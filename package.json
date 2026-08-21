@@ -1,0 +1,43 @@
+{
+    "name": "memdel",
+    "version": "0.0.1",
+    "description": "Record and clip HTML canvas + Web Audio output to MP4",
+    "type": "module",
+    "license": "GPL-3.0-or-later",
+    "main": "./dist/index.js",
+    "module": "./dist/index.mjs",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.mjs",
+            "require": "./dist/index.js"
+        }
+    },
+    "files": [
+        "dist",
+        "README.md",
+        "LICENSE"
+    ],
+    "engines": {
+        "node": ">=18"
+    },
+    "packageManager": "pnpm@11.22.0",
+    "peerDependencies": {
+        "mediabunny": ">=1.0.0"
+    },
+    "devDependencies": {
+        "esbuild": "^0.24.0",
+        "mediabunny": ">=1.0.0",
+        "prettier": "3.9.6",
+        "typescript": "^5.6.0"
+    },
+    "scripts": {
+        "build": "node build.js && npm run build:types",
+        "build:types": "tsc --emitDeclarationOnly --outDir dist",
+        "typecheck": "tsc --noEmit",
+        "format": "prettier --write .",
+        "format:check": "prettier --check .",
+        "prepublishOnly": "npm run build"
+    }
+}
