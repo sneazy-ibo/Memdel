@@ -2,8 +2,27 @@
     "name": "memdel",
     "version": "0.1.0",
     "description": "Record and clip HTML canvas + Web Audio output to MP4",
-    "type": "module",
     "license": "GPL-3.0-or-later",
+    "author": "sneazy-ibo",
+    "homepage": "https://github.com/sneazy-ibo/Memdel#readme",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/sneazy-ibo/Memdel"
+    },
+    "bugs": "https://github.com/sneazy-ibo/Memdel/issues",
+    "keywords": [
+        "recording",
+        "canvas",
+        "webaudio",
+        "webcodecs",
+        "game-recording",
+        "clipping",
+        "medal.tv",
+        "mp4",
+        "webm",
+        "browser"
+    ],
+    "type": "module",
     "main": "./dist/index.js",
     "module": "./dist/index.mjs",
     "types": "./dist/index.d.ts",
@@ -19,6 +38,8 @@
         "README.md",
         "LICENSE"
     ],
+    "jsdelivr": "dist/index.iife.min.js",
+    "unpkg": "dist/index.iife.min.js",
     "engines": {
         "node": ">=18"
     },
