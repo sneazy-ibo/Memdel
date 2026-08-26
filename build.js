@@ -29,13 +29,13 @@ await Promise.all([
         ...shared,
         format: 'iife',
         globalName: 'Memdel',
-        outfile: 'dist/index.global.js'
+        outfile: 'dist/index.iife.js'
     }),
     esbuild.build({
         ...shared,
         format: 'iife',
         globalName: 'Memdel',
-        outfile: 'dist/index.global.min.js',
+        outfile: 'dist/index.iife.min.js',
         minify: true
     })
 ]);
