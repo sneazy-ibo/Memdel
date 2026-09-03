@@ -1,3 +1,17 @@
+import { Quality } from 'mediabunny';
+import { CONTAINERS } from './containers.js';
+
+/**
+ * Numbers are treated as bitrates in bits/sec, strings are quality levels.
+ * @param {number|import('mediabunny').QualityLevel|Quality} value
+ * @returns {Quality}
+ */
+export function toQuality(value) {
+    if (value instanceof Quality) return value;
+    if (typeof value === 'number') return new Quality({ bitrate: value });
+    return new Quality(value);
+}
+
 /**
  * Trigger a browser download for a Blob.
  * @param {Blob} blob
@@ -14,20 +28,22 @@ export function downloadBlob(blob, filename) {
 }
 
 /**
- * Fire `callback` when the tab has been hidden for `ms` continuously.
- * Returns a teardown function that removes the listener.
- * @param {() => void} callback
+ * Fire `onHidden` once the tab has been hidden for `ms` continuously, and
+ * `onShow` whenever it becomes visible again. Returns a teardown function.
+ * @param {{ onHidden: () => void, onShow?: () => void }} callbacks
  * @param {number} [ms=750]
  * @returns {() => void} teardown
  */
-export function onHiddenDebounced(callback, ms = 750) {
+export function onVisibilityChange({ onHidden, onShow }, ms = 750) {
     let timer = null;
     const handler = () => {
         clearTimeout(timer);
         if (document.hidden) {
             timer = setTimeout(() => {
-                if (document.hidden) callback();
+                if (document.hidden) onHidden();
             }, ms);
+        } else {
+            onShow?.();
         }
     };
     document.addEventListener('visibilitychange', handler);
@@ -63,6 +79,36 @@ export function generateFilename(template, fallbackTemplate, extension = 'mp4') 
     };
     const name = tpl.replace(/YYYY|MM|DD|HH|mm|ss/g, (match) => tokens[match]);
     return `${name}.${extension}`;
+}
+
+/**
+ * Create a bound logger that captures the class's onLog / debug config.
+ * @param {((message: string) => void) | null} onLog
+ * @param {boolean} debug
+ * @returns {(message: string) => void}
+ */
+export function createLogger(onLog, debug) {
+    return (message) => {
+        if (onLog) onLog(message);
+        else if (debug) console.debug('[memdel]', message);
+    };
+}
+
+/**
+ * Build a filename from a name template or a timestamped fallback, using the
+ * container's extension. With `seconds` the fallback includes the clip length.
+ * @param {string} name
+ * @param {'mp4' | 'mov' | 'webm' | 'mkv'} container
+ * @param {number} [seconds]
+ * @returns {string}
+ */
+export function generateOutputFilename(name, container, seconds) {
+    const ext = new CONTAINERS[container].Format().fileExtension.replace(/^\./, '');
+    const fallback =
+        seconds !== undefined
+            ? `replay_YYYY-MM-DD_HH-mm-ss_${Math.round(seconds)}s`
+            : 'recording-YYYY-MM-DD_HH-mm-ss';
+    return generateFilename(name, fallback, ext);
 }
 
 /**
