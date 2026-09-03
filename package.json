@@ -1,6 +1,6 @@
 {
     "name": "memdel",
-    "version": "0.1.1",
+    "version": "0.2.0",
     "description": "Record and clip HTML canvas + Web Audio output to MP4",
     "license": "GPL-3.0-or-later",
     "author": "sneazy-ibo",
