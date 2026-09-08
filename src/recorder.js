@@ -151,13 +151,12 @@ export class Recorder {
     }
 
     /**
-     * Live byte count of encoded data so far, `null` in filesystem mode
-     * (data streams straight to disk). Final file is slightly larger due to
-     * container overhead.
-     * @returns {number|null}
+     * Live byte count written to the output so far, tracked via the target's
+     * `write` event. Includes container overhead and works in both buffer and
+     * filesystem mode. Resets on each `start()`.
+     * @returns {number}
      */
     get bytesWritten() {
-        if (this._fileHandle) return null;
         return this._liveBytes;
     }
 
@@ -260,6 +259,9 @@ export class Recorder {
             format: outputFormat,
             target: this._target
         });
+        this._target.on('write', ({ end }) => {
+            this._liveBytes = Math.max(this._liveBytes, end);
+        });
 
         await Promise.all([this._initVideo(outputFormat), this._initAudio(outputFormat)]);
 
@@ -349,7 +351,6 @@ export class Recorder {
                 height: this._encodeHeight
             },
             onEncodedPacket: (pkt, meta) => {
-                this._liveBytes += pkt.byteLength;
                 this.onVideoPacket?.(pkt, meta);
             }
         });
@@ -379,6 +380,7 @@ export class Recorder {
         if (!bestAudioCodec) return;
 
         this._audioTap = tapAudioNode(this.audioNode);
+        if (!this._audioTap) return;
         const audioTrack = this._audioTap.track;
         if (!audioTrack) return;
 
@@ -386,7 +388,6 @@ export class Recorder {
             codec: bestAudioCodec,
             quality: this.audioQuality,
             onEncodedPacket: (pkt, meta) => {
-                this._liveBytes += pkt.byteLength;
                 this.onAudioPacket?.(pkt, meta);
             }
         });

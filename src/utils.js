@@ -123,10 +123,11 @@ export function generateOutputFilename(name, container, seconds) {
  * `track.getSettings()` doesn't reliably report them on all browsers.
  *
  * @param {AudioNode} node
- * @returns {{ ctx: AudioContext, channelCount: number, track: MediaStreamAudioTrack, disconnect: () => void }}
+ * @returns {{ ctx: AudioContext, channelCount: number, track: MediaStreamAudioTrack, disconnect: () => void } | null}
  */
 export function tapAudioNode(node) {
     const ctx = /** @type {AudioContext} */ (node.context);
+    if (ctx.state === 'closed') return null;
     const dest = ctx.createMediaStreamDestination();
     const [track] = dest.stream.getAudioTracks();
     node.connect(dest);

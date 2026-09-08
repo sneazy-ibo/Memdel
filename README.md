@@ -98,6 +98,25 @@ recorder.pause();
 recorder.resume();
 ```
 
+### Continuous clipping
+
+`Replayer` keeps the last N seconds of canvas + audio encoded in a rolling buffer. Whenever something clip-worthy happens, `saveLastSeconds()` muxes that window into a file:
+
+```js
+import { Replayer } from 'memdel';
+
+const replayer = new Replayer(canvas, { audioNode: masterGain, bufferSeconds: 15 });
+await replayer.start();
+// ... right after the moment you want to keep
+const blob = await replayer.saveLastSeconds(); // downloads (also returns the Blob)
+```
+
+With `targetMB` set, exports stay within a file size budget instead of following a fixed quality:
+
+```js
+const replayer = new Replayer(canvas, { audioNode: masterGain, targetMB: 16 });
+```
+
 ### Streaming to disk directly
 
 On browsers that support the File System Access API, you can record straight to a folder instead of recording in memory and triggering a browser download each time:
@@ -117,6 +136,7 @@ const recorder = new Recorder(canvas, { saveMode: 'auto' }); // uses the directo
 | Option         | Type                                   | Default       | Notes                                                                                                                                              |
 | -------------- | -------------------------------------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `fps`          | `number`                               | `60`          |                                                                                                                                                    |
+| `container`    | `"mp4" \| "mov" \| "webm" \| "mkv"`    | `"mp4"`       | Output container format                                                                                                                            |
 | `videoQuality` | `number \| string \| Quality`          | `"high"`      | A bitrate in bits/sec (positive integer), a level (`"very-low"`\|`"low"`\|`"medium"`\|`"high"`\|`"very-high"`), or a mediabunny `Quality` instance |
 | `audioQuality` | `number \| string \| Quality`          | `"very-high"` | Same shape as `videoQuality`                                                                                                                       |
 | `saveMode`     | `"auto" \| "filesystem" \| "download"` | `"auto"`      | See save modes below                                                                                                                               |
@@ -134,7 +154,7 @@ const recorder = new Recorder(canvas, { saveMode: 'auto' }); // uses the directo
 
 - `recorder.recording` — `boolean`, whether a recording is in progress.
 - `recorder.paused` — `boolean`, whether the current recording is paused.
-- `recorder.bytesWritten` — live byte count so far, or `null` in filesystem mode.
+- `recorder.bytesWritten` — live byte count written to the output so far (includes container overhead), works in both memory and filesystem mode.
 - `recorder.directoryName` — name of the selected recording directory, or `null`.
 - `recorder.configure(options)` — update config between recordings (throws if called while recording). Accepts any of `fps`, `container`, `videoQuality`, `audioQuality`, `saveMode`, `audioNode`.
 - `await recorder.setRecordingDirectory()` — prompts the user to pick a folder, resolves to the directory handle.
@@ -150,6 +170,45 @@ const recorder = new Recorder(canvas, { saveMode: 'auto' }); // uses the directo
 - `onVideoPacket(packet, meta)` — called for each encoded video packet with its chunk metadata.
 - `onAudioPacket(packet, meta)` — same for audio.
 
+### `new Replayer(canvas, options?)`
+
+Records a canvas into a rolling buffer of encoded packets. Call `saveLastSeconds()` at any point to mux the last N seconds into a file — muxing only, no re-encode.
+
+| Option             | Type                                | Default       | Notes                                                                                                              |
+| ------------------ | ----------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `fps`              | `number`                            | `60`          |                                                                                                                    |
+| `container`        | `"mp4" \| "mov" \| "webm" \| "mkv"` | `"mp4"`       | Output container format                                                                                            |
+| `videoQuality`     | `number \| string \| Quality`       | `"high"`      | Same shape as Recorder's; ignored while `targetMB` is set                                                          |
+| `audioQuality`     | `number \| string \| Quality`       | `"very-high"` | Same shape as Recorder's; audio is pinned to max quality while `targetMB` is set                                   |
+| `audioNode`        | `AudioNode`                         | `null`        | Same tap as Recorder; omit for video-only clips                                                                    |
+| `bufferSeconds`    | `number`                            | `15`          | How much footage the rolling buffer holds                                                                          |
+| `keyframeInterval` | `number`                            | `2`           | Seconds between keyframes; also the granularity `targetMB` trimming works at                                       |
+| `targetMB`         | `number`                            | `null`        | Target export size in MB; `videoQuality` is derived to fit it and clips are shortened only if the cap can't be met |
+| `name`             | `string`                            | `""`          | Filename template — same tokens as Recorder                                                                        |
+| `onLog`            | `(message: string) => void`         | `null`        | Internal diagnostics                                                                                               |
+| `debug`            | `boolean`                           | `false`       | Extra diagnostics (size trims, encoder lag); logs to `console.debug` if `onLog` isn't set                          |
+
+**Static**
+
+- `Replayer.isSupported` — same requirements as `Recorder.isSupported`.
+
+**Instance**
+
+- `replayer.recording` / `replayer.paused` — booleans, same meaning as on Recorder.
+- `replayer.bufferBytes` — total byte size of the raw encoded packets currently buffered.
+- `replayer.estimateExportBytes(seconds?)` — the encoded size of the clip `saveLastSeconds(seconds)` would currently produce (a hair under the muxed file size), or `null` when nothing is exportable yet.
+- `replayer.configure(options)` — update settings, including mid-recording. Quality, `container`, `targetMB`, and `audioNode` changes rebuild the pipeline; buffered footage is only cleared when video encoding semantics change.
+- `replayer.pause()` / `replayer.resume()` — like Recorder; audio and video stay aligned across pauses.
+- `await replayer.start()` — begins filling the buffer (auto-pauses while the tab is hidden).
+- `await replayer.stop()` — stops and clears the buffer.
+- `await replayer.saveLastSeconds(seconds?, { download? })` — muxes the last `seconds` of footage into a file and downloads it; pass `{ download: false }` to just get the `Blob`. The clip is cut to run _exactly_ the requested duration, anchored to a keyframe (up to one GOP of the freshest footage may be left out). Resolves to the `Blob`, or `null` when nothing is exportable. With `targetMB` set, an over-budget clip is shortened from the front.
+
+**Callbacks**
+
+- `onStart()` / `onStop()` / `onPause()` / `onResume()`
+- `onExport({ duration, size })`
+- `onVideoPacket(packet, meta)` / `onAudioPacket(packet, meta)` — same as Recorder.
+
 ### Save modes
 
 | Mode           | Behavior                                                                                                      |
@@ -157,6 +216,10 @@ const recorder = new Recorder(canvas, { saveMode: 'auto' }); // uses the directo
 | `"auto"`       | Uses the picked directory if `setRecordingDirectory()` was called, otherwise falls back to a browser download |
 | `"filesystem"` | Always writes to the picked directory, throws if none is set or the API isn't supported                       |
 | `"download"`   | Always buffers in memory and triggers a download when `stop()` resolves                                       |
+
+## Browser support
+
+Requires WebCodecs + `canvas.captureStream`, check `Recorder.isSupported` / `Replayer.isSupported` at runtime. Streaming to a picked directory additionally needs the File System Access API (Chromium only), check `Recorder.filesystemSupported`.
 
 ## License
 
