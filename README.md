@@ -184,6 +184,7 @@ Records a canvas into a rolling buffer of encoded packets. Call `saveLastSeconds
 | `bufferSeconds`    | `number`                            | `15`          | How much footage the rolling buffer holds                                                                          |
 | `keyframeInterval` | `number`                            | `2`           | Seconds between keyframes; also the granularity `targetMB` trimming works at                                       |
 | `targetMB`         | `number`                            | `null`        | Target export size in MB; `videoQuality` is derived to fit it and clips are shortened only if the cap can't be met |
+| `bitrateMode`      | `"constant" \| "variable"`          | `"constant"`  | Encoder bitrate mode while `targetMB` is set; `variable` spends more bits on complex scenes                        |
 | `name`             | `string`                            | `""`          | Filename template — same tokens as Recorder                                                                        |
 | `onLog`            | `(message: string) => void`         | `null`        | Internal diagnostics                                                                                               |
 | `debug`            | `boolean`                           | `false`       | Extra diagnostics (size trims, encoder lag); logs to `console.debug` if `onLog` isn't set                          |
@@ -197,7 +198,7 @@ Records a canvas into a rolling buffer of encoded packets. Call `saveLastSeconds
 - `replayer.recording` / `replayer.paused` — booleans, same meaning as on Recorder.
 - `replayer.bufferBytes` — total byte size of the raw encoded packets currently buffered.
 - `replayer.estimateExportBytes(seconds?)` — the encoded size of the clip `saveLastSeconds(seconds)` would currently produce (a hair under the muxed file size), or `null` when nothing is exportable yet.
-- `replayer.configure(options)` — update settings, including mid-recording. Quality, `container`, `targetMB`, and `audioNode` changes rebuild the pipeline; buffered footage is only cleared when video encoding semantics change.
+- `replayer.configure(options)` — update settings, including mid-recording. Quality, `container`, `targetMB`, `bitrateMode`, and `audioNode` changes rebuild the pipeline; buffered footage is only cleared when video encoding semantics change.
 - `replayer.pause()` / `replayer.resume()` — like Recorder; audio and video stay aligned across pauses.
 - `await replayer.start()` — begins filling the buffer (auto-pauses while the tab is hidden).
 - `await replayer.stop()` — stops and clears the buffer.

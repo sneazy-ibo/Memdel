@@ -14,8 +14,8 @@ importers:
                 specifier: ^0.28.2
                 version: 0.28.2
             mediabunny:
-                specifier: ^1.55.1
-                version: 1.55.1
+                specifier: ^1.56.0
+                version: 1.56.0
             prettier:
                 specifier: 3.9.6
                 version: 3.9.6
@@ -284,10 +284,10 @@ packages:
         engines: { node: '>=18' }
         hasBin: true
 
-    mediabunny@1.55.1:
+    mediabunny@1.56.0:
         resolution:
             {
-                integrity: sha512-JDdTEUOw9g6Ey8eWc2Ei63GmRGtGTJoE56SE7CHikwzS8i9xpsWcve4bEiUw47d4j49L3r7MXDFsH/5oZIhjBw==
+                integrity: sha512-VLVYEVXI4fA2PabQoZs3XOmxDsio4gpG1Npz0iVICRNCQ+XYI3fBOngnwHljafaEjHUbYzrIDoctZbxcVfQpgQ==
             }
 
     prettier@3.9.6:
@@ -422,7 +422,7 @@ snapshots:
             '@esbuild/win32-ia32': 0.28.2
             '@esbuild/win32-x64': 0.28.2
 
-    mediabunny@1.55.1:
+    mediabunny@1.56.0:
         dependencies:
             '@types/dom-mediacapture-transform': 0.1.12
             '@types/dom-webcodecs': 0.1.13

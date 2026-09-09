@@ -85,11 +85,12 @@ export function generateFilename(template, fallbackTemplate, extension = 'mp4') 
  * Create a bound logger that captures the class's onLog / debug config.
  * @param {((message: string) => void) | null} onLog
  * @param {boolean} debug
- * @returns {(message: string) => void}
+ * @returns {(message: string, level?: 'error') => void}
  */
 export function createLogger(onLog, debug) {
-    return (message) => {
+    return (message, level) => {
         if (onLog) onLog(message);
+        else if (level === 'error') console.error('[memdel]', message);
         else if (debug) console.debug('[memdel]', message);
     };
 }

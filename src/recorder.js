@@ -2,10 +2,10 @@ import {
     Output,
     StreamTarget,
     BufferTarget,
-    CanvasSource,
+    MediaStreamVideoTrackSource,
     MediaStreamAudioTrackSource,
-    getEncodableVideoCodecs,
-    getEncodableAudioCodecs
+    getFirstEncodableVideoCodec,
+    getFirstEncodableAudioCodec
 } from 'mediabunny';
 import { CONTAINERS } from './containers.js';
 import {
@@ -113,8 +113,6 @@ export class Recorder {
         this._active = false;
         this._paused = false;
         this._startTime = 0;
-        this._frameTimer = 0;
-        this._lastFrameTime = 0;
         this._pausedAccum = 0;
         this._pauseStartedAt = 0;
         this._liveBytes = 0;
@@ -125,13 +123,15 @@ export class Recorder {
         this._directoryHandle = null;
         this._stopVisibilityWatch = null;
 
-        // Evenly rounded encode size, CanvasSource letterboxes into this box itself.
+        // Evenly rounded encode size, the video source letterboxes into this box
         this._encodeWidth = 0;
         this._encodeHeight = 0;
 
         // --- Mediabunny pipeline ---
         this._output = null;
         this._outputFormat = null;
+        /** @type {MediaStream|null} */
+        this._captureStream = null;
         this._videoSource = null;
         this._audioSource = null;
         this._audioTap = null;
@@ -200,27 +200,26 @@ export class Recorder {
         return this._directoryHandle;
     }
 
+    clearRecordingDirectory() {
+        this._directoryHandle = null;
+    }
+
     pause() {
         if (!this._active) throw new Error('Not recording.');
         if (this._paused) return;
         this._paused = true;
         this._pauseStartedAt = performance.now();
+        this._videoSource?.pause();
         this._audioSource?.pause();
         this._log('Recording paused');
         this.onPause?.();
     }
 
-    /**
-     * Resumes a paused recording, offsetting timestamps by the pause gap so
-     * there's no hole in the output.
-     */
     resume() {
         if (!this._active) throw new Error('Not recording.');
         if (!this._paused) return;
-        const pausedFor = performance.now() - this._pauseStartedAt;
-        this._pausedAccum += pausedFor;
-        this._frameTimer += pausedFor;
-        this._lastFrameTime += pausedFor;
+        this._pausedAccum += performance.now() - this._pauseStartedAt;
+        this._videoSource?.resume();
         this._audioSource?.resume();
         this._paused = false;
         this._log('Recording resumed');
@@ -238,8 +237,6 @@ export class Recorder {
         this._paused = false;
         this._pausedAccum = 0;
 
-        // Filesystem mode streams through a WritableStream and needs an
-        // append only container layout however buffer mode can use the compact one.
         const useFilesystem =
             this.saveMode === 'filesystem' ||
             (this.saveMode === 'auto' && this._directoryHandle != null);
@@ -272,9 +269,6 @@ export class Recorder {
 
         this._active = true;
         this._startTime = performance.now();
-        this._frameTimer = this._startTime;
-        this._lastFrameTime = this._startTime;
-        this._frameLoop();
 
         this.onStart?.();
 
@@ -289,7 +283,7 @@ export class Recorder {
      */
     async stop() {
         if (!this._active) throw new Error('Not recording.');
-        this._active = false; // halt frame loop before async teardown
+        this._active = false;
         this._paused = false;
         this._stopVisibilityWatch?.();
         this._stopVisibilityWatch = null;
@@ -297,6 +291,8 @@ export class Recorder {
         if (this._videoSource) this._videoSource.close();
         if (this._audioSource) this._audioSource.close();
         if (this._output) await this._output.finalize();
+        this._captureStream?.getVideoTracks().forEach((t) => t.stop());
+        this._captureStream = null;
 
         // Disconnect after finalize to make sure the last packets land before disconnecting
         this._disconnectAudio();
@@ -321,12 +317,12 @@ export class Recorder {
     }
 
     /**
-     * Selects the best video codec, sets up the CanvasSource and videoDecoderConfig.
+     * Selects the best video codec and sets up the capture stream video source.
      * @private
      * @param {import('mediabunny').OutputFormat} outputFormat
      */
     async _initVideo(outputFormat) {
-        const availableVideoCodecs = await getEncodableVideoCodecs(
+        const bestVideoCodec = await getFirstEncodableVideoCodec(
             outputFormat.getSupportedVideoCodecs(),
             {
                 width: this._encodeWidth,
@@ -334,27 +330,31 @@ export class Recorder {
                 quality: this.videoQuality
             }
         );
-        this._log(`Available video codecs: ${availableVideoCodecs.join(', ') || 'none'}`);
-
-        const bestVideoCodec = availableVideoCodecs[0] ?? null;
         if (!bestVideoCodec) throw new Error('No supported video codec found.');
 
-        this._videoSource = new CanvasSource(this.canvas, {
+        this._captureStream = this.canvas.captureStream(this.fps);
+        const [videoTrack] = this._captureStream.getVideoTracks();
+
+        this._videoSource = new MediaStreamVideoTrackSource(videoTrack, {
             codec: bestVideoCodec,
             quality: this.videoQuality,
-            latencyMode: 'realtime',
             contentHint: 'motion',
-            // Stay in original box size (letterboxing)
+            // Letterbox into the initial resolution prevents stretching on resize
             sizeChangeBehavior: 'contain',
             transform: {
                 width: this._encodeWidth,
-                height: this._encodeHeight
+                height: this._encodeHeight,
+                fit: 'contain'
             },
             onEncodedPacket: (pkt, meta) => {
                 this.onVideoPacket?.(pkt, meta);
             }
         });
         this._output.addVideoTrack(this._videoSource, { frameRate: this.fps });
+
+        this._videoSource.errorPromise.catch((err) => {
+            this._log(`Video source error: ${err?.message ?? err}`, 'error');
+        });
 
         this.videoDecoderConfig = {
             codec: bestVideoCodec,
@@ -371,20 +371,15 @@ export class Recorder {
     async _initAudio(outputFormat) {
         if (!this.audioNode) return;
 
-        const availableAudioCodecs = await getEncodableAudioCodecs(
+        const bestAudioCodec = await getFirstEncodableAudioCodec(
             outputFormat.getSupportedAudioCodecs()
         );
-        this._log(`Available audio codecs: ${availableAudioCodecs.join(', ') || 'none'}`);
-
-        const bestAudioCodec = availableAudioCodecs[0] ?? null;
         if (!bestAudioCodec) return;
 
         this._audioTap = tapAudioNode(this.audioNode);
         if (!this._audioTap) return;
-        const audioTrack = this._audioTap.track;
-        if (!audioTrack) return;
 
-        this._audioSource = new MediaStreamAudioTrackSource(audioTrack, {
+        this._audioSource = new MediaStreamAudioTrackSource(this._audioTap.track, {
             codec: bestAudioCodec,
             quality: this.audioQuality,
             onEncodedPacket: (pkt, meta) => {
@@ -394,7 +389,7 @@ export class Recorder {
         this._output.addAudioTrack(this._audioSource);
 
         this._audioSource.errorPromise.catch((err) => {
-            throw new Error(`Audio source error: ${err?.message ?? err}`);
+            this._log(`Audio source error: ${err?.message ?? err}, 'error'`);
         });
 
         const { sampleRate } = this._audioTap.ctx;
@@ -432,29 +427,5 @@ export class Recorder {
     _disconnectAudio() {
         this._audioTap?.disconnect();
         this._audioTap = null;
-    }
-
-    /** @private */
-    async _frameLoop() {
-        if (!this._active) return;
-        if (this._paused) {
-            requestAnimationFrame(() => this._frameLoop());
-            return;
-        }
-        const now = performance.now();
-        if (now - this._frameTimer >= 1000 / this.fps) {
-            this._frameTimer += 1000 / this.fps;
-            await this._captureFrame();
-        }
-        requestAnimationFrame(() => this._frameLoop());
-    }
-
-    /** @private */
-    async _captureFrame() {
-        const now = performance.now();
-        const durationSec = (now - this._lastFrameTime) / 1000;
-        const timestampSec = (now - this._startTime - this._pausedAccum) / 1000;
-        this._lastFrameTime = now;
-        await this._videoSource.add(timestampSec, durationSec);
     }
 }

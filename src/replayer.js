@@ -3,12 +3,12 @@ import {
     Output,
     NullTarget,
     BufferTarget,
-    CanvasSource,
+    MediaStreamVideoTrackSource,
     MediaStreamAudioTrackSource,
     EncodedVideoPacketSource,
     EncodedAudioPacketSource,
-    getEncodableVideoCodecs,
-    getEncodableAudioCodecs
+    getFirstEncodableVideoCodec,
+    getFirstEncodableAudioCodec
 } from 'mediabunny';
 import { CONTAINERS } from './containers.js';
 import {
@@ -46,6 +46,7 @@ const TARGET_AIM = 0.95;
  * @property {number|QualityLevel|Quality} [audioQuality="very-high"]
  * @property {AudioNode} [audioNode]
  * @property {number} [targetMB]
+ * @property {'constant' | 'variable'} [bitrateMode="constant"]
  * @property {number} [bufferSeconds=15]
  * @property {number} [keyframeInterval=2]
  * @property {string} [name=""]
@@ -90,6 +91,7 @@ export class Replayer {
         this.keyframeInterval = options.keyframeInterval ?? 2;
         this.name = options.name ?? '';
         this.targetMB = options.targetMB;
+        this.bitrateMode = options.bitrateMode ?? 'constant';
 
         this.onLog = options.onLog ?? null;
         this.debug = options.debug ?? false;
@@ -116,12 +118,7 @@ export class Replayer {
         this._active = false;
         this._paused = false;
         this._autoPaused = false;
-        this._startTime = 0;
-        this._pausedAccum = 0;
-        this._pauseStartedAt = 0;
-        this._frameIndex = 0;
         this._lastPruneTime = 0;
-        this._lagLogged = false;
         this._stopVisibilityWatch = null;
 
         this._encodeWidth = 0;
@@ -153,6 +150,8 @@ export class Replayer {
 
         // --- Live capture pipeline ---
         this._holdingOutput = null;
+        /** @type {MediaStream|null} */
+        this._captureStream = null;
         this._videoSource = null;
         this._audioSource = null;
         this._audioTap = null;
@@ -180,21 +179,40 @@ export class Replayer {
     }
 
     /**
-     * Encoded packet byte size an export of `seconds` would produce right now.
+     * Encoded packet byte size an export of `seconds` would produce right now,
+     * including the targetMB cap an export would apply.
      * @param {number} [seconds=this.bufferSeconds]
      * @returns {number|null}
      */
     estimateExportBytes(seconds = this.bufferSeconds) {
         const clip = this._selectExportWindow(seconds);
         if (!clip) return null;
-        return Math.round(this._sumBytes(clip.exportVideo) + this._sumBytes(clip.exportAudio));
+        const { exportVideo, exportAudio } = clip;
+        const audioBytes = this._sumBytes(exportAudio);
+        let videoBytes = this._sumBytes(exportVideo);
+        if (!this._targetMBActive()) return Math.round(videoBytes + audioBytes);
+
+        // An export over the budget trims GOP at the front, walk them off the same way
+        // so the estimate matches the muxed result instead of the raw window.
+        const lastTs = exportVideo.at(-1).timestamp;
+        const span = lastTs - exportVideo[0].timestamp || 1;
+        let start = 0;
+        let size = videoBytes + audioBytes;
+        while (size > this.targetMB * 1e6) {
+            const next = exportVideo.findIndex((c, i) => i > start && c.type === 'key');
+            if (next < 0) break;
+            for (let i = start; i < next; i++) videoBytes -= exportVideo[i].pkt.byteLength;
+            start = next;
+            size = videoBytes + audioBytes * ((lastTs - exportVideo[start].timestamp) / span);
+        }
+        return Math.round(size);
     }
 
     /**
-     * Update settings, including while recording. Quality, `container`,
-     * `targetMB`, and `audioNode` changes reinitialize the pipeline, keeping
-     * buffered footage unless video encoding semantics changed.
-     * @typedef {Pick<ReplayerConfig, 'fps' | 'container' | 'videoQuality' | 'audioQuality' | 'targetMB' | 'bufferSeconds' | 'keyframeInterval' | 'audioNode'>} ReplayerConfigOverrides
+     * Update settings, including while recording. Any change that affects the
+     * capture rebuilds the pipeline, while buffered footage is only cleared
+     * when video encoding semantics have changed.
+     * @typedef {Pick<ReplayerConfig, 'fps' | 'container' | 'videoQuality' | 'audioQuality' | 'targetMB' | 'bitrateMode' | 'bufferSeconds' | 'keyframeInterval' | 'audioNode'>} ReplayerConfigOverrides
      * @param {ReplayerConfigOverrides} [config]
      */
     async configure({
@@ -203,6 +221,7 @@ export class Replayer {
         videoQuality,
         audioQuality,
         targetMB,
+        bitrateMode,
         bufferSeconds,
         keyframeInterval,
         audioNode
@@ -214,35 +233,35 @@ export class Replayer {
             throw new Error(`Unsupported container "${container}".`);
         }
         if (targetMB !== undefined) this.targetMB = targetMB;
+        const prevBitrateMode = this.bitrateMode;
+        if (bitrateMode !== undefined) this.bitrateMode = bitrateMode;
 
         const targetMBActive = this._targetMBActive();
         const qualityChange = videoQuality !== undefined || audioQuality !== undefined;
-        const needsReinit =
+        const encoderChanged =
             (qualityChange && !targetMBActive) ||
             container !== undefined ||
             targetMB !== undefined ||
-            (audioNode !== undefined && audioNode !== this.audioNode) ||
             (targetMBActive && bufferSeconds !== undefined);
-        const resetBuffer =
-            (qualityChange && !targetMBActive) ||
-            container !== undefined ||
-            targetMB !== undefined ||
+        const rebuild =
+            encoderChanged ||
             fps !== undefined ||
-            (targetMBActive && bufferSeconds !== undefined);
+            (bitrateMode !== undefined && bitrateMode !== prevBitrateMode && targetMBActive) ||
+            (audioNode !== undefined && audioNode !== this.audioNode);
 
         if (container !== undefined) this.container = container;
         if (videoQuality !== undefined) this.videoQuality = toQuality(videoQuality);
         if (audioQuality !== undefined) this.audioQuality = toQuality(audioQuality);
         if (audioNode !== undefined) this.audioNode = audioNode;
 
-        if (needsReinit && this._active) await this._reinitSources(resetBuffer);
+        if (rebuild && this._active) await this._reinitSources(encoderChanged);
     }
 
     pause() {
         if (!this._active) throw new Error('Not recording.');
         if (this._paused) return;
         this._paused = true;
-        this._pauseStartedAt = performance.now();
+        this._videoSource?.pause();
         this._audioSource?.pause();
         this.onPause?.();
     }
@@ -250,7 +269,7 @@ export class Replayer {
     resume() {
         if (!this._active) throw new Error('Not recording.');
         if (!this._paused) return;
-        this._pausedAccum += performance.now() - this._pauseStartedAt;
+        this._videoSource?.resume();
         this._audioSource?.resume();
         this._paused = false;
         this.onResume?.();
@@ -277,12 +296,8 @@ export class Replayer {
         this._active = true;
         this._paused = false;
         this._autoPaused = false;
-        this._pausedAccum = 0;
-        this._frameIndex = 0;
-        this._lastPruneTime = 0;
-        this._startTime = performance.now();
 
-        // Automatically pause while hidden, debounced so brief hides (e.g. DevTools) don't trigger.
+        // Automatically pause while hidden, debounced so brief hides (e.g. DevTools) don't trigger
         if (!this._stopVisibilityWatch) {
             this._stopVisibilityWatch = onVisibilityChange(
                 {
@@ -303,7 +318,6 @@ export class Replayer {
             );
         }
 
-        this._captureLoop();
         this.onStart?.();
 
         this._log(
@@ -365,16 +379,17 @@ export class Replayer {
         };
         const clipLen = () =>
             exportVideo.at(-1).timestamp - exportVideo[0].timestamp + 1 / this.fps;
-
         const fullSeconds = clipLen();
+
+        const targeting = this._targetMBActive();
+        const targetBytes = targeting ? this.targetMB * 1e6 : 0;
 
         let blob = await muxWindow();
         const fullBlobSize = blob.size;
 
         // When over budet: drop the oldest key frame groups and remux until it fits
         let droppedGOPs = 0;
-        if (this._targetMBActive()) {
-            const targetBytes = this.targetMB * 1e6;
+        if (targeting) {
             let guard = 0;
             while (blob.size > targetBytes && guard++ < 64) {
                 const nextKey = exportVideo.findIndex((c, i) => i > 0 && c.type === 'key');
@@ -394,8 +409,8 @@ export class Replayer {
         const clipSeconds = clipLen();
 
         // If the full window muxed X% over the aim, the next request drops X%
-        if (this._targetMBActive() && this._requestedVideoBitrate && fullBlobSize > 0) {
-            const aimBytes = this.targetMB * 1e6 * TARGET_AIM;
+        if (targeting && this._requestedVideoBitrate && fullBlobSize > 0) {
+            const aimBytes = targetBytes * TARGET_AIM;
             const next = this._sizeCorrection * (aimBytes / fullBlobSize);
             this._sizeCorrection = this._smoothRatio(this._sizeCorrection, next, 0.5, 2);
         }
@@ -404,8 +419,7 @@ export class Replayer {
             downloadBlob(blob, generateOutputFilename(this.name, this.container, clipSeconds));
 
         let targetNote = '';
-        if (this._targetMBActive()) {
-            const targetBytes = this.targetMB * 1e6;
+        if (targeting) {
             targetNote = ` (target ${this.targetMB} MB, ${Math.round((blob.size / targetBytes) * 100)}%`;
             if (droppedGOPs > 0)
                 targetNote += `, full ${Math.round((fullBlobSize / targetBytes) * 100)}%`;
@@ -416,11 +430,6 @@ export class Replayer {
         this.onExport?.(result);
 
         return blob;
-    }
-
-    /** @private */
-    _elapsedSeconds() {
-        return (performance.now() - this._startTime - this._pausedAccum) / 1000;
     }
 
     /** @private */
@@ -452,15 +461,12 @@ export class Replayer {
         if (start < 0) return null;
         const endTs = video[start].timestamp + seconds;
         const end = video.findIndex((c) => c.timestamp > endTs);
-        const exportVideo = video
-            .slice(start, end < 0 ? undefined : end)
-            .sort((a, b) => a.timestamp - b.timestamp);
+        const exportVideo = video.slice(start, end < 0 ? undefined : end);
         const exportAudio = this._audioChunks.filter(
             (c) =>
                 c.timestamp >= exportVideo[0].timestamp &&
                 c.timestamp <= exportVideo.at(-1).timestamp
         );
-        exportAudio.sort((a, b) => a.timestamp - b.timestamp);
         return { exportVideo, exportAudio };
     }
 
@@ -509,7 +515,7 @@ export class Replayer {
             );
         }
         this._requestedVideoBitrate = Math.round(Math.max(1000, available));
-        return new Quality({ bitrate: this._requestedVideoBitrate, bitrateMode: 'constant' });
+        return new Quality({ bitrate: this._requestedVideoBitrate, bitrateMode: this.bitrateMode });
     }
 
     /**
@@ -529,12 +535,11 @@ export class Replayer {
         const targeting = this._targetMBActive();
         this._resolvedAudioQuality = targeting ? toQuality('very-high') : this.audioQuality;
 
-        const availableAudio = this.audioNode
-            ? await getEncodableAudioCodecs(format.getSupportedAudioCodecs(), {
+        const audioCodec = this.audioNode
+            ? await getFirstEncodableAudioCodec(format.getSupportedAudioCodecs(), {
                   quality: this._resolvedAudioQuality
               })
-            : [];
-        const audioCodec = this.audioNode ? (availableAudio[0] ?? null) : null;
+            : null;
 
         if (targeting) {
             const audioBitrate = audioCodec ? (this._measuredAudioBitrate() ?? 0) : 0;
@@ -544,46 +549,53 @@ export class Replayer {
             this._resolvedVideoQuality = this.videoQuality;
         }
 
-        const availableVideo = await getEncodableVideoCodecs(format.getSupportedVideoCodecs(), {
+        const videoCodec = await getFirstEncodableVideoCodec(format.getSupportedVideoCodecs(), {
             width: this._encodeWidth,
             height: this._encodeHeight,
             quality: this._resolvedVideoQuality
         });
-        this._log(`Available video codecs: ${availableVideo.join(', ') || 'none'}`);
-        if (this.audioNode)
-            this._log(`Available audio codecs: ${availableAudio.join(', ') || 'none'}`);
-
-        const videoCodec = availableVideo[0] ?? null;
         if (!videoCodec) throw new Error('No supported video codec found.');
 
         return { videoCodec, audioCodec };
     }
 
     /** @private */
-    async _initSources() {
+    async _initSources(videoTail = null, audioTail = null) {
         const containerDef = CONTAINERS[this.container];
         this._holdingOutput = new Output({
             format: new containerDef.Format(containerDef.streaming),
             target: new NullTarget()
         });
 
-        this._videoSource = new CanvasSource(this.canvas, {
+        this._captureStream = this.canvas.captureStream(this.fps);
+        const [videoTrack] = this._captureStream.getVideoTracks();
+
+        // Fresh sources stamp from 0, offset packets to continue the kept buffer
+        const videoOffset = videoTail ?? 0;
+        const audioOffset = audioTail ?? 0;
+
+        this._videoSource = new MediaStreamVideoTrackSource(videoTrack, {
             codec: this._videoCodec,
             quality: this._resolvedVideoQuality,
-            latencyMode: 'realtime',
             contentHint: 'motion',
             sizeChangeBehavior: 'contain',
             keyFrameInterval: this.keyframeInterval,
             transform: {
                 width: this._encodeWidth,
-                height: this._encodeHeight
+                height: this._encodeHeight,
+                fit: 'contain'
             },
             onEncodedPacket: (pkt, meta) => {
                 if (meta?.decoderConfig && !this.videoDecoderConfig)
                     this.videoDecoderConfig = meta.decoderConfig;
-                this._videoChunks.push({ pkt, timestamp: pkt.timestamp, type: pkt.type });
+                const ts = pkt.timestamp + videoOffset;
+                this._videoChunks.push({ pkt, timestamp: ts, type: pkt.type });
+                this._pruneIfDue();
                 this.onVideoPacket?.(pkt, meta);
             }
+        });
+        this._videoSource.errorPromise.catch((err) => {
+            this._log(`Video source error: ${err?.message ?? err}, 'error'`);
         });
         this._holdingOutput.addVideoTrack(this._videoSource, { frameRate: this.fps });
 
@@ -598,16 +610,14 @@ export class Replayer {
                     onEncodedPacket: (pkt, meta) => {
                         if (meta?.decoderConfig && !this.audioDecoderConfig)
                             this.audioDecoderConfig = meta.decoderConfig;
-                        // Stamp on the capture timeline so A/V and prune share one basis.
-                        this._audioChunks.push({ pkt, timestamp: this._frameIndex / this.fps });
+                        this._audioChunks.push({ pkt, timestamp: pkt.timestamp + audioOffset });
                         this.onAudioPacket?.(pkt, meta);
                     }
                 });
-                this._holdingOutput.addAudioTrack(this._audioSource);
-
                 this._audioSource.errorPromise.catch((err) => {
-                    throw new Error(`Audio source error: ${err?.message ?? err}`);
+                    this._log(`Audio source error: ${err?.message ?? err}, 'error'`);
                 });
+                this._holdingOutput.addAudioTrack(this._audioSource);
             }
         }
 
@@ -625,6 +635,8 @@ export class Replayer {
         _audioTap?.disconnect();
         this._audioTap = null;
         this._holdingOutput = null;
+        this._captureStream?.getVideoTracks().forEach((t) => t.stop());
+        this._captureStream = null;
     }
 
     /**
@@ -637,77 +649,34 @@ export class Replayer {
         this._videoCodec = videoCodec;
         this._audioCodec = audioCodec;
 
+        const videoTail = resetBuffer ? null : (this._videoChunks.at(-1)?.timestamp ?? null);
+        // If no buffered audio yet, continue from the video tail
+        const audioTail = resetBuffer ? null : (this._audioChunks.at(-1)?.timestamp ?? videoTail);
+
         await this._teardownSources();
         if (resetBuffer) {
             this.videoDecoderConfig = null;
             this.audioDecoderConfig = null;
-            // Buffered packets were encoded under the old settings; reset the buffer.
             this._videoChunks = [];
             this._audioChunks = [];
         }
-        await this._initSources();
+        await this._initSources(videoTail, audioTail);
 
         this._log(
             `Pipeline reinitialized - video: ${videoCodec} | audio: ${audioCodec ?? 'none'}${resetBuffer ? ' (buffer reset)' : ''}`
         );
     }
 
-    /** @private */
-    async _captureLoop() {
-        if (!this._active) return;
-        if (this._paused) {
-            requestAnimationFrame(() => this._captureLoop());
-            return;
-        }
-
-        const elapsed = this._elapsedSeconds();
-        const frameDuration = 1 / this.fps;
-        const expectedIndex = Math.floor(elapsed / frameDuration);
-
-        while (this._frameIndex <= expectedIndex) {
-            const timestampSec = this._frameIndex * frameDuration;
-            // Snapshot the source so we don't lose it on a reinit
-            const source = this._videoSource;
-            if (!source) {
-                requestAnimationFrame(() => this._captureLoop());
-                return;
-            }
-            try {
-                await source.add(timestampSec, frameDuration);
-            } catch (err) {
-                if (!this._active) return;
-                if (source !== this._videoSource) {
-                    requestAnimationFrame(() => this._captureLoop());
-                    return;
-                }
-                throw err;
-            }
-            this._frameIndex++;
-        }
-
-        this._pruneIfDue();
-
-        // Debug visibility for encoder backpressure (which used to shrink the buffer).
-        if (this.debug) {
-            const lag = this._elapsedSeconds() - this._frameIndex * frameDuration;
-            if (lag > 1 && !this._lagLogged) {
-                this._lagLogged = true;
-                this._log(`Encoder ${lag.toFixed(1)}s behind - retention follows footage time`);
-            } else if (lag <= 1) {
-                this._lagLogged = false;
-            }
-        }
-
-        requestAnimationFrame(() => this._captureLoop());
-    }
-
-    /** @private */
+    /**
+     * Trim the rolling buffer which is throttled to 1/s
+     * @private
+     */
     _pruneIfDue() {
         const now = performance.now();
         if (now - this._lastPruneTime < 1000) return;
         this._lastPruneTime = now;
 
-        // Retention follows footage time, not wall clock.
+        // Retention follows footage time instead of wall clock
         const lastTs = this._videoChunks.at(-1)?.timestamp;
         if (lastTs === undefined) return;
         const cutoff = lastTs - (this.bufferSeconds + this.keyframeInterval + 1);
@@ -737,7 +706,7 @@ export class Replayer {
      */
     async _mux(videoChunks, audioChunks, firstTs) {
         const containerDef = CONTAINERS[this.container];
-        const outputFormat = new containerDef.Format(containerDef.buffer);
+        const outputFormat = new containerDef.Format(containerDef.export);
         const output = new Output({ format: outputFormat, target: new BufferTarget() });
 
         const videoSource = new EncodedVideoPacketSource(this._videoCodec);
