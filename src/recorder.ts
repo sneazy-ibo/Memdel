@@ -5,47 +5,62 @@ import {
     MediaStreamVideoTrackSource,
     MediaStreamAudioTrackSource,
     getFirstEncodableVideoCodec,
-    getFirstEncodableAudioCodec
+    getFirstEncodableAudioCodec,
+    type OutputFormat,
+    type VideoCodec,
+    type Quality,
+    type QualityLevel,
+    type EncodedPacket
 } from 'mediabunny';
-import { CONTAINERS } from './containers.js';
+import { CONTAINERS, type ContainerName } from './containers';
 import {
     downloadBlob,
     onVisibilityChange,
     tapAudioNode,
+    type AudioTap,
     generateOutputFilename,
     createLogger,
     toQuality
-} from './utils.js';
+} from './utils';
 
 /**
- * @typedef {import('mediabunny').QualityLevel} QualityLevel
- * @typedef {import('mediabunny').Quality} Quality
- * @typedef {import('mediabunny').EncodedPacket} EncodedPacket
+ * - `'auto'` — use filesystem if supported, silently fall back to memory
+ * - `'filesystem'` — always use filesystem, throws if unsupported
+ * - `'memory'` — always buffer in memory and trigger a download on stop
  */
+export type SaveMode = 'auto' | 'filesystem' | 'memory';
 
-/**
- * @typedef {'auto' | 'filesystem' | 'download'} SaveMode
- *
- * - `'auto'`       - use filesystem if supported, silently fall back to download
- * - `'filesystem'` - always use filesystem, throws if unsupported
- * - `'download'`   - always buffer in memory and trigger a download on stop
- */
+export interface RecorderConfig {
+    fps?: number;
+    /** Output container format. */
+    container?: ContainerName;
+    /**
+     * A target bitrate in bits/sec (positive integer), a qualitative level
+     * ("very-low"|"low"|"medium"|"high"|"very-high"), or a mediabunny `Quality` instance.
+     */
+    videoQuality?: number | QualityLevel | Quality;
+    /** Same shape as `videoQuality`. */
+    audioQuality?: number | QualityLevel | Quality;
+    saveMode?: SaveMode;
+    /**
+     * The node to tap for audio (e.g. a master gain/bus node). Omit to record
+     * video only. Its own context (`node.context`) is used for capture.
+     */
+    audioNode?: AudioNode;
+    /** Filename template, supports `YYYY`/`MM`/`DD`/`HH`/`mm`/`ss`, falls back to a timestamped name. */
+    name?: string;
+    /** Called with internal diagnostic messages. */
+    onLog?: (message: string) => void;
+    /** If true and `onLog` isn't provided, logs to console.debug. */
+    debug?: boolean;
+}
 
-/**
- * @typedef {Object} RecorderConfig
- * @property {number}   [fps=60]
- * @property {'mp4' | 'mov' | 'webm' | 'mkv'} [container="mp4"] - Output container format.
- * @property {number|QualityLevel|Quality} [videoQuality="high"] - A target bitrate in bits/sec
- *   (positive integer), a qualitative level ("very-low"|"low"|"medium"|"high"|"very-high"), or
- *   a mediabunny `Quality` instance.
- * @property {number|QualityLevel|Quality} [audioQuality="very-high"] - Same shape as `videoQuality`.
- * @property {SaveMode} [saveMode="auto"]
- * @property {AudioNode} [audioNode] - The node to tap for audio (e.g. a master gain/bus node).
- *   Omit to record video only. Its own context (`node.context`) is used for capture.
- * @property {string} [name=""] - Filename template. See the `name` property below.
- * @property {(message: string) => void} [onLog] - Called with internal diagnostic messages.
- * @property {boolean} [debug=false] - If true and `onLog` isn't provided, logs to console.debug.
- */
+export type RecorderConfigOverrides = Partial<
+    Pick<
+        RecorderConfig,
+        'fps' | 'container' | 'videoQuality' | 'audioQuality' | 'saveMode' | 'audioNode'
+    >
+>;
 
 /**
  * Records a canvas (and optionally an `AudioNode`) to a file, either streaming
@@ -57,13 +72,13 @@ import {
  * await recorder.stop();
  */
 export class Recorder {
-    /** @returns {boolean} Whether the File System Access API is available. */
-    static get filesystemSupported() {
+    /** Whether the File System Access API is available. */
+    static get filesystemSupported(): boolean {
         return typeof window !== 'undefined' && typeof window.showDirectoryPicker === 'function';
     }
 
-    /** @returns {boolean} Whether this browser supports the APIs Recorder needs at all. */
-    static get isSupported() {
+    /** Whether this browser supports the APIs Recorder needs at all. */
+    static get isSupported(): boolean {
         return (
             typeof window !== 'undefined' &&
             'VideoEncoder' in window &&
@@ -71,20 +86,75 @@ export class Recorder {
         );
     }
 
-    /**
-     * @param {HTMLCanvasElement} canvas
-     * @param {RecorderConfig} [options]
-     */
-    constructor(canvas, options = {}) {
+    canvas: HTMLCanvasElement;
+    fps: number;
+    container: ContainerName;
+    videoQuality: Quality;
+    audioQuality: Quality;
+    saveMode: SaveMode;
+    name: string;
+    audioNode: AudioNode | null;
+    onLog: ((message: string) => void) | null;
+    debug: boolean;
+
+    _log: (message: string, level?: 'error') => void;
+
+    // --- Callbacks ---
+    onStart: (() => void) | null = null;
+    onVideoPacket:
+        ((packet: EncodedPacket, meta: EncodedVideoChunkMetadata | undefined) => void) | null =
+        null;
+    onAudioPacket:
+        ((packet: EncodedPacket, meta: EncodedAudioChunkMetadata | undefined) => void) | null =
+        null;
+    onStop: ((result: { duration: number; size: number }) => void) | null = null;
+    onPause: (() => void) | null = null;
+    onResume: (() => void) | null = null;
+
+    // --- Recording state ---
+    private _active = false;
+    private _paused = false;
+    private _startTime = 0;
+    private _pausedAccum = 0;
+    private _pauseStartedAt = 0;
+    private _liveBytes = 0;
+
+    // --- Mediabunny pipeline ---
+    private _target: StreamTarget | BufferTarget | null = null;
+    private _fileHandle: FileSystemFileHandle | null = null;
+    private _directoryHandle: FileSystemDirectoryHandle | null = null;
+    private _stopVisibilityWatch: (() => void) | null = null;
+
+    // Evenly rounded encode size, the video source letterboxes into this box
+    private _encodeWidth = 0;
+    private _encodeHeight = 0;
+
+    private _output: Output | null = null;
+    private _outputFormat: OutputFormat | null = null;
+    private _captureStream: MediaStream | null = null;
+    private _videoSource: MediaStreamVideoTrackSource | null = null;
+    private _audioSource: MediaStreamAudioTrackSource | null = null;
+    private _audioTap: AudioTap | null = null;
+
+    videoDecoderConfig: {
+        codec: string;
+        codedWidth: number;
+        codedHeight: number;
+    } | null = null;
+    audioDecoderConfig: {
+        codec: string;
+        sampleRate: number;
+        numberOfChannels: number;
+    } | null = null;
+
+    constructor(canvas: HTMLCanvasElement, options: RecorderConfig = {}) {
         this.canvas = canvas;
 
         // --- Config ---
         this.fps = options.fps ?? 60;
-        /** @type {'mp4' | 'mov' | 'webm' | 'mkv'} */
         this.container = options.container ?? 'mp4';
         this.videoQuality = toQuality(options.videoQuality ?? 'high');
         this.audioQuality = toQuality(options.audioQuality ?? 'very-high');
-        /** @type {SaveMode} */
         this.saveMode = options.saveMode ?? 'auto';
         this.name = options.name ?? '';
 
@@ -94,59 +164,13 @@ export class Recorder {
         this.debug = options.debug ?? false;
 
         this._log = createLogger(this.onLog, this.debug);
-
-        // --- Callbacks ---
-        /** @type {(() => void) | null} */
-        this.onStart = null;
-        /** @type {((packet: EncodedPacket, meta: EncodedVideoChunkMetadata | undefined) => void) | null} */
-        this.onVideoPacket = null;
-        /** @type {((packet: EncodedPacket, meta: EncodedAudioChunkMetadata | undefined) => void) | null} */
-        this.onAudioPacket = null;
-        /** @type {((result: { duration: number, size: number }) => void) | null} */
-        this.onStop = null;
-        /** @type {(() => void) | null} */
-        this.onPause = null;
-        /** @type {(() => void) | null} */
-        this.onResume = null;
-
-        // --- Recording state ---
-        this._active = false;
-        this._paused = false;
-        this._startTime = 0;
-        this._pausedAccum = 0;
-        this._pauseStartedAt = 0;
-        this._liveBytes = 0;
-        /** @type {StreamTarget | BufferTarget | null} */
-        this._target = null;
-        /** @type {FileSystemFileHandle | null} */
-        this._fileHandle = null;
-        this._directoryHandle = null;
-        this._stopVisibilityWatch = null;
-
-        // Evenly rounded encode size, the video source letterboxes into this box
-        this._encodeWidth = 0;
-        this._encodeHeight = 0;
-
-        // --- Mediabunny pipeline ---
-        this._output = null;
-        this._outputFormat = null;
-        /** @type {MediaStream|null} */
-        this._captureStream = null;
-        this._videoSource = null;
-        this._audioSource = null;
-        this._audioTap = null;
-
-        this.videoDecoderConfig = null;
-        this.audioDecoderConfig = null;
     }
 
-    /** @returns {boolean} */
-    get recording() {
+    get recording(): boolean {
         return this._active;
     }
 
-    /** @returns {boolean} */
-    get paused() {
+    get paused(): boolean {
         return this._paused;
     }
 
@@ -154,26 +178,22 @@ export class Recorder {
      * Live byte count written to the output so far, tracked via the target's
      * `write` event. Includes container overhead and works in both buffer and
      * filesystem mode. Resets on each `start()`.
-     * @returns {number}
      */
-    get bytesWritten() {
+    get bytesWritten(): number {
         return this._liveBytes;
     }
 
     /**
      * The name of the currently selected recording directory, or null if none.
      * Note: browsers expose only the folder name, not the full path.
-     * @returns {string|null}
      */
-    get directoryName() {
+    get directoryName(): string | null {
         return this._directoryHandle?.name ?? null;
     }
 
-    /**
-     * @typedef {Pick<RecorderConfig, 'fps' | 'container' | 'videoQuality' | 'audioQuality' | 'saveMode' | 'audioNode'>} RecorderConfigOverrides
-     * @param {RecorderConfigOverrides} [config]
-     */
-    configure({ fps, container, videoQuality, audioQuality, saveMode, audioNode } = {}) {
+    /** Update config between recordings (throws while recording). */
+    configure(overrides: RecorderConfigOverrides = {}): void {
+        const { fps, container, videoQuality, audioQuality, saveMode, audioNode } = overrides;
         if (this._active) throw new Error('Cannot configure while recording.');
         if (fps !== undefined) this.fps = fps;
         if (container !== undefined) {
@@ -189,9 +209,8 @@ export class Recorder {
     /**
      * Prompts the user to pick a recordings directory. Only needs to be
      * called once because the handle persists for the page's lifetime.
-     * @returns {Promise<FileSystemDirectoryHandle>}
      */
-    async setRecordingDirectory() {
+    async setRecordingDirectory(): Promise<FileSystemDirectoryHandle> {
         if (!Recorder.filesystemSupported)
             throw new Error('File System Access API is not supported in this browser.');
         this._directoryHandle = await window.showDirectoryPicker({
@@ -200,11 +219,11 @@ export class Recorder {
         return this._directoryHandle;
     }
 
-    clearRecordingDirectory() {
+    clearRecordingDirectory(): void {
         this._directoryHandle = null;
     }
 
-    pause() {
+    pause(): void {
         if (!this._active) throw new Error('Not recording.');
         if (this._paused) return;
         this._paused = true;
@@ -215,7 +234,7 @@ export class Recorder {
         this.onPause?.();
     }
 
-    resume() {
+    resume(): void {
         if (!this._active) throw new Error('Not recording.');
         if (!this._paused) return;
         this._pausedAccum += performance.now() - this._pauseStartedAt;
@@ -226,7 +245,7 @@ export class Recorder {
         this.onResume?.();
     }
 
-    async start() {
+    async start(): Promise<void> {
         if (this._active) throw new Error('Already recording.');
 
         // Dimensions have to be even, with & ~1 the odd bits are cleared
@@ -260,9 +279,12 @@ export class Recorder {
             this._liveBytes = Math.max(this._liveBytes, end);
         });
 
-        await Promise.all([this._initVideo(outputFormat), this._initAudio(outputFormat)]);
+        const [codec] = await Promise.all([
+            this._initVideo(outputFormat),
+            this._initAudio(outputFormat)
+        ]);
 
-        await this._output.start();
+        await this._output!.start();
 
         // Debounced to avoid false positives when the tab is briefly hidden (e.g. opening DevTools)
         this._stopVisibilityWatch = onVisibilityChange({ onHidden: () => this.stop() }, 750);
@@ -273,23 +295,22 @@ export class Recorder {
         this.onStart?.();
 
         this._log(
-            `Recording started - codec: ${this.videoDecoderConfig.codec}, fps: ${this.fps}, resolution: ${this._encodeWidth}x${this._encodeHeight}`
+            `Recording started - codec: ${codec}, fps: ${this.fps}, resolution: ${this._encodeWidth}x${this._encodeHeight}`
         );
     }
 
     /**
-     * @returns {Promise<{ duration: number, size: number }>}
-     *   `duration` in seconds, `size` in bytes
+     * @returns `duration` in seconds, `size` in bytes
      */
-    async stop() {
+    async stop(): Promise<{ duration: number; size: number }> {
         if (!this._active) throw new Error('Not recording.');
         this._active = false;
         this._paused = false;
         this._stopVisibilityWatch?.();
         this._stopVisibilityWatch = null;
 
-        if (this._videoSource) this._videoSource.close();
-        if (this._audioSource) this._audioSource.close();
+        this._videoSource?.close();
+        this._audioSource?.close();
         if (this._output) await this._output.finalize();
         this._captureStream?.getVideoTracks().forEach((t) => t.stop());
         this._captureStream = null;
@@ -299,13 +320,14 @@ export class Recorder {
 
         const duration = performance.now() - this._startTime - this._pausedAccum;
 
-        let size;
+        let size: number;
         if (this._fileHandle) {
             const file = await this._fileHandle.getFile();
             size = file.size;
         } else {
-            const blob = new Blob([/** @type {BufferTarget} */ (this._target).buffer], {
-                type: this._outputFormat.mimeType
+            const buffer = this._target instanceof BufferTarget ? this._target.buffer : null;
+            const blob = new Blob([buffer ?? new ArrayBuffer(0)], {
+                type: this._outputFormat?.mimeType
             });
             size = blob.size;
             downloadBlob(blob, generateOutputFilename(this.name, this.container));
@@ -316,12 +338,8 @@ export class Recorder {
         return result;
     }
 
-    /**
-     * Selects the best video codec and sets up the capture stream video source.
-     * @private
-     * @param {import('mediabunny').OutputFormat} outputFormat
-     */
-    async _initVideo(outputFormat) {
+    /** Selects the best video codec and sets up the capture stream video source. */
+    private async _initVideo(outputFormat: OutputFormat): Promise<VideoCodec> {
         const bestVideoCodec = await getFirstEncodableVideoCodec(
             outputFormat.getSupportedVideoCodecs(),
             {
@@ -350,7 +368,7 @@ export class Recorder {
                 this.onVideoPacket?.(pkt, meta);
             }
         });
-        this._output.addVideoTrack(this._videoSource, { frameRate: this.fps });
+        this._output!.addVideoTrack(this._videoSource, { frameRate: this.fps });
 
         this._videoSource.errorPromise.catch((err) => {
             this._log(`Video source error: ${err?.message ?? err}`, 'error');
@@ -361,14 +379,11 @@ export class Recorder {
             codedWidth: this._encodeWidth,
             codedHeight: this._encodeHeight
         };
+        return bestVideoCodec;
     }
 
-    /**
-     * Selects the best audio codec and taps the provided audio node.
-     * @private
-     * @param {import('mediabunny').OutputFormat} outputFormat
-     */
-    async _initAudio(outputFormat) {
+    /** Selects the best audio codec and taps the provided audio node. */
+    private async _initAudio(outputFormat: OutputFormat): Promise<void> {
         if (!this.audioNode) return;
 
         const bestAudioCodec = await getFirstEncodableAudioCodec(
@@ -386,10 +401,10 @@ export class Recorder {
                 this.onAudioPacket?.(pkt, meta);
             }
         });
-        this._output.addAudioTrack(this._audioSource);
+        this._output!.addAudioTrack(this._audioSource);
 
         this._audioSource.errorPromise.catch((err) => {
-            this._log(`Audio source error: ${err?.message ?? err}, 'error'`);
+            this._log(`Audio source error: ${err?.message ?? err}`, 'error');
         });
 
         const { sampleRate } = this._audioTap.ctx;
@@ -404,12 +419,9 @@ export class Recorder {
             `Audio ready (codec: ${bestAudioCodec}, sampleRate: ${sampleRate}, channels: ${channelCount})`
         );
     }
-    /**
-     * Opens a writable stream for a new file in the selected recording directory.
-     * @private
-     * @returns {Promise<FileSystemWritableFileStream>}
-     */
-    async _openFileWritable() {
+
+    /** Opens a writable stream for a new file in the selected recording directory. */
+    private async _openFileWritable(): Promise<FileSystemWritableFileStream> {
         if (!this._directoryHandle)
             throw new Error('No recording directory set. Call setRecordingDirectory() first.');
 
@@ -423,8 +435,7 @@ export class Recorder {
         return handle.createWritable();
     }
 
-    /** @private */
-    _disconnectAudio() {
+    private _disconnectAudio(): void {
         this._audioTap?.disconnect();
         this._audioTap = null;
     }

@@ -7,6 +7,9 @@ settings:
 importers:
     .:
         devDependencies:
+            '@types/dom-webcodecs':
+                specifier: ^0.1.19
+                version: 0.1.19
             '@types/wicg-file-system-access':
                 specifier: ^2023.10.7
                 version: 2023.10.7
@@ -270,6 +273,12 @@ packages:
                 integrity: sha512-O5hkiFIcjjszPIYyUSyvScyvrBoV3NOEEZx/pMlsu44TKzWNkLVBBxnxJz42in5n3QIolYOcBYFCPZZ0h8SkwQ==
             }
 
+    '@types/dom-webcodecs@0.1.19':
+        resolution:
+            {
+                integrity: sha512-+yFUIDUaASFz0vQpWBErPxun/Lb+F0TdrlTsj50gm7K797YzEx2TmV6fEiwciHyFNghlZYPgQXH5qRcwMHcJFQ==
+            }
+
     '@types/wicg-file-system-access@2023.10.7':
         resolution:
             {
@@ -387,9 +396,11 @@ snapshots:
 
     '@types/dom-mediacapture-transform@0.1.12':
         dependencies:
-            '@types/dom-webcodecs': 0.1.13
+            '@types/dom-webcodecs': 0.1.19
 
     '@types/dom-webcodecs@0.1.13': {}
+
+    '@types/dom-webcodecs@0.1.19': {}
 
     '@types/wicg-file-system-access@2023.10.7': {}
 

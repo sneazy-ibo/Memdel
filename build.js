@@ -4,7 +4,7 @@ import { rmSync } from 'node:fs';
 rmSync('dist', { recursive: true, force: true });
 
 const shared = {
-    entryPoints: ['src/index.js'],
+    entryPoints: ['src/index.ts'],
     bundle: true,
     sourcemap: true,
     target: ['es2020'],

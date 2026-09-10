@@ -133,17 +133,17 @@ const recorder = new Recorder(canvas, { saveMode: 'auto' }); // uses the directo
 
 ### `new Recorder(canvas, options?)`
 
-| Option         | Type                                   | Default       | Notes                                                                                                                                              |
-| -------------- | -------------------------------------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fps`          | `number`                               | `60`          |                                                                                                                                                    |
-| `container`    | `"mp4" \| "mov" \| "webm" \| "mkv"`    | `"mp4"`       | Output container format                                                                                                                            |
-| `videoQuality` | `number \| string \| Quality`          | `"high"`      | A bitrate in bits/sec (positive integer), a level (`"very-low"`\|`"low"`\|`"medium"`\|`"high"`\|`"very-high"`), or a mediabunny `Quality` instance |
-| `audioQuality` | `number \| string \| Quality`          | `"very-high"` | Same shape as `videoQuality`                                                                                                                       |
-| `saveMode`     | `"auto" \| "filesystem" \| "download"` | `"auto"`      | See save modes below                                                                                                                               |
-| `audioNode`    | `AudioNode`                            | `null`        | The node to tap (e.g. a master gain/bus node), its context is used for capture                                                                     |
-| `name`         | `string`                               | `""`          | Filename template — supports `YYYY`/`MM`/`DD`/`HH`/`mm`/`ss`, falls back to a timestamped name                                                     |
-| `onLog`        | `(message: string) => void`            | `null`        | Internal diagnostics                                                                                                                               |
-| `debug`        | `boolean`                              | `false`       | Logs to `console.debug` if `onLog` isn't set                                                                                                       |
+| Option         | Type                                 | Default       | Notes                                                                                                                                              |
+| -------------- | ------------------------------------ | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fps`          | `number`                             | `60`          |                                                                                                                                                    |
+| `container`    | `"mp4" \| "mov" \| "webm" \| "mkv"`  | `"mp4"`       | Output container format                                                                                                                            |
+| `videoQuality` | `number \| string \| Quality`        | `"high"`      | A bitrate in bits/sec (positive integer), a level (`"very-low"`\|`"low"`\|`"medium"`\|`"high"`\|`"very-high"`), or a mediabunny `Quality` instance |
+| `audioQuality` | `number \| string \| Quality`        | `"very-high"` | Same shape as `videoQuality`                                                                                                                       |
+| `saveMode`     | `"auto" \| "filesystem" \| "memory"` | `"auto"`      | See save modes below                                                                                                                               |
+| `audioNode`    | `AudioNode`                          | `null`        | The node to tap (e.g. a master gain/bus node), its context is used for capture                                                                     |
+| `name`         | `string`                             | `""`          | Filename template — supports `YYYY`/`MM`/`DD`/`HH`/`mm`/`ss`, falls back to a timestamped name                                                     |
+| `onLog`        | `(message: string) => void`          | `null`        | Internal diagnostics                                                                                                                               |
+| `debug`        | `boolean`                            | `false`       | Logs to `console.debug` if `onLog` isn't set                                                                                                       |
 
 **Static**
 
@@ -212,11 +212,11 @@ Records a canvas into a rolling buffer of encoded packets. Call `saveLastSeconds
 
 ### Save modes
 
-| Mode           | Behavior                                                                                                      |
-| -------------- | ------------------------------------------------------------------------------------------------------------- |
-| `"auto"`       | Uses the picked directory if `setRecordingDirectory()` was called, otherwise falls back to a browser download |
-| `"filesystem"` | Always writes to the picked directory, throws if none is set or the API isn't supported                       |
-| `"download"`   | Always buffers in memory and triggers a download when `stop()` resolves                                       |
+| Mode           | Behavior                                                                                          |
+| -------------- | ------------------------------------------------------------------------------------------------- |
+| `"auto"`       | Uses the picked directory if `setRecordingDirectory()` was called, otherwise falls back to memory |
+| `"filesystem"` | Always writes to the picked directory, throws if none is set or the API isn't supported           |
+| `"memory"`     | Always buffers in memory and triggers a download when `stop()` resolves                           |
 
 ## Browser support
 

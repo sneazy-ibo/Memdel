@@ -1,23 +1,17 @@
-import { Quality } from 'mediabunny';
-import { CONTAINERS } from './containers.js';
+import { Quality, type QualityLevel } from 'mediabunny';
+import { ContainerName, CONTAINERS } from './containers';
 
 /**
  * Numbers are treated as bitrates in bits/sec, strings are quality levels.
- * @param {number|import('mediabunny').QualityLevel|Quality} value
- * @returns {Quality}
  */
-export function toQuality(value) {
+export function toQuality(value: number | QualityLevel | Quality): Quality {
     if (value instanceof Quality) return value;
     if (typeof value === 'number') return new Quality({ bitrate: value });
     return new Quality(value);
 }
 
-/**
- * Trigger a browser download for a Blob.
- * @param {Blob} blob
- * @param {string} filename
- */
-export function downloadBlob(blob, filename) {
+/** Trigger a browser download for a Blob. */
+export function downloadBlob(blob: Blob, filename: string): void {
     const url = URL.createObjectURL(blob);
     const a = Object.assign(document.createElement('a'), {
         href: url,
@@ -30,14 +24,14 @@ export function downloadBlob(blob, filename) {
 /**
  * Fire `onHidden` once the tab has been hidden for `ms` continuously, and
  * `onShow` whenever it becomes visible again. Returns a teardown function.
- * @param {{ onHidden: () => void, onShow?: () => void }} callbacks
- * @param {number} [ms=750]
- * @returns {() => void} teardown
  */
-export function onVisibilityChange({ onHidden, onShow }, ms = 750) {
-    let timer = null;
+export function onVisibilityChange(
+    { onHidden, onShow }: { onHidden: () => void; onShow?: () => void },
+    ms = 750
+): () => void {
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const handler = () => {
-        clearTimeout(timer);
+        clearTimeout(timer!);
         if (document.hidden) {
             timer = setTimeout(() => {
                 if (document.hidden) onHidden();
@@ -48,7 +42,7 @@ export function onVisibilityChange({ onHidden, onShow }, ms = 750) {
     };
     document.addEventListener('visibilitychange', handler);
     return () => {
-        clearTimeout(timer);
+        clearTimeout(timer!);
         document.removeEventListener('visibilitychange', handler);
     };
 }
@@ -59,17 +53,16 @@ export function onVisibilityChange({ onHidden, onShow }, ms = 750) {
  * Falls back to `fallbackTemplate` when `template` is blank.
  *
  * e.g. `generateFilename("clip_YYYY-MM-DD")` -> `"clip_2026-08-22.mp4"`
- *
- * @param {string} template
- * @param {string} fallbackTemplate
- * @param {string} [extension="mp4"]
- * @returns {string}
  */
-export function generateFilename(template, fallbackTemplate, extension = 'mp4') {
-    const tpl = template?.trim() || fallbackTemplate;
+export function generateFilename(
+    template: string,
+    fallbackTemplate: string,
+    extension = 'mp4'
+): string {
+    const tpl = template.trim() || fallbackTemplate;
     const now = new Date();
-    const pad = (n) => String(n).padStart(2, '0');
-    const tokens = {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const tokens: Record<string, string | number> = {
         YYYY: now.getFullYear(),
         MM: pad(now.getMonth() + 1),
         DD: pad(now.getDate()),
@@ -77,17 +70,15 @@ export function generateFilename(template, fallbackTemplate, extension = 'mp4') 
         mm: pad(now.getMinutes()),
         ss: pad(now.getSeconds())
     };
-    const name = tpl.replace(/YYYY|MM|DD|HH|mm|ss/g, (match) => tokens[match]);
+    const name = tpl.replace(/YYYY|MM|DD|HH|mm|ss/g, (match) => String(tokens[match]));
     return `${name}.${extension}`;
 }
 
-/**
- * Create a bound logger that captures the class's onLog / debug config.
- * @param {((message: string) => void) | null} onLog
- * @param {boolean} debug
- * @returns {(message: string, level?: 'error') => void}
- */
-export function createLogger(onLog, debug) {
+/** Create a bound logger that captures the class's onLog / debug config. */
+export function createLogger(
+    onLog: ((message: string) => void) | null,
+    debug: boolean
+): (message: string, level?: 'error') => void {
     return (message, level) => {
         if (onLog) onLog(message);
         else if (level === 'error') console.error('[memdel]', message);
@@ -98,18 +89,25 @@ export function createLogger(onLog, debug) {
 /**
  * Build a filename from a name template or a timestamped fallback, using the
  * container's extension. With `seconds` the fallback includes the clip length.
- * @param {string} name
- * @param {'mp4' | 'mov' | 'webm' | 'mkv'} container
- * @param {number} [seconds]
- * @returns {string}
  */
-export function generateOutputFilename(name, container, seconds) {
+export function generateOutputFilename(
+    name: string,
+    container: ContainerName,
+    seconds?: number
+): string {
     const ext = new CONTAINERS[container].Format().fileExtension.replace(/^\./, '');
     const fallback =
         seconds !== undefined
             ? `replay_YYYY-MM-DD_HH-mm-ss_${Math.round(seconds)}s`
             : 'recording-YYYY-MM-DD_HH-mm-ss';
     return generateFilename(name, fallback, ext);
+}
+
+export interface AudioTap {
+    ctx: AudioContext;
+    channelCount: number;
+    track: MediaStreamAudioTrack;
+    disconnect: () => void;
 }
 
 /**
@@ -123,11 +121,10 @@ export function generateOutputFilename(name, container, seconds) {
  * `ctx` and `channelCount` are returned explicitly because
  * `track.getSettings()` doesn't reliably report them on all browsers.
  *
- * @param {AudioNode} node
- * @returns {{ ctx: AudioContext, channelCount: number, track: MediaStreamAudioTrack, disconnect: () => void } | null}
+ * Returns `null` when the node's context is closed, so no audio can be captured.
  */
-export function tapAudioNode(node) {
-    const ctx = /** @type {AudioContext} */ (node.context);
+export function tapAudioNode(node: AudioNode): AudioTap | null {
+    const ctx = node.context as AudioContext;
     if (ctx.state === 'closed') return null;
     const dest = ctx.createMediaStreamDestination();
     const [track] = dest.stream.getAudioTracks();
@@ -135,7 +132,7 @@ export function tapAudioNode(node) {
     return {
         ctx,
         channelCount: dest.channelCount,
-        track: /** @type {MediaStreamAudioTrack} */ (track),
+        track: track as MediaStreamAudioTrack,
         disconnect: () => node.disconnect(dest)
     };
 }

@@ -45,9 +45,10 @@
     },
     "packageManager": "pnpm@11.22.0",
     "peerDependencies": {
-        "mediabunny": ">=1.0.0"
+        "mediabunny": "^1.56.0"
     },
     "devDependencies": {
+        "@types/dom-webcodecs": "^0.1.19",
         "@types/wicg-file-system-access": "^2023.10.7",
         "esbuild": "^0.28.2",
         "mediabunny": "^1.56.0",

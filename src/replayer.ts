@@ -8,51 +8,67 @@ import {
     EncodedVideoPacketSource,
     EncodedAudioPacketSource,
     getFirstEncodableVideoCodec,
-    getFirstEncodableAudioCodec
+    getFirstEncodableAudioCodec,
+    type VideoCodec,
+    type AudioCodec,
+    type QualityLevel,
+    type EncodedPacket,
+    type PacketType
 } from 'mediabunny';
-import { CONTAINERS } from './containers.js';
+import { CONTAINERS, type ContainerName } from './containers';
 import {
     downloadBlob,
+    onVisibilityChange,
     tapAudioNode,
+    type AudioTap,
     generateOutputFilename,
     createLogger,
-    onVisibilityChange,
     toQuality
-} from './utils.js';
+} from './utils';
 
 // Aiming under targetMB so normal size variance doesn't trigger the trim cap
 const TARGET_AIM = 0.95;
 
-/**
- * @typedef {import('mediabunny').QualityLevel} QualityLevel
- * @typedef {import('mediabunny').EncodedPacket} EncodedPacket
- * @typedef {import('mediabunny').PacketType} PacketType
- */
+/** A raw encoded packet held in the rolling buffer, stamped on the recording timeline. */
+export interface BufferedPacket {
+    pkt: EncodedPacket;
+    timestamp: number;
+}
 
-/**
- * A raw encoded packet held in the rolling buffer, stamped on the recording timeline.
- * @typedef {Object} BufferedPacket
- * @property {EncodedPacket} pkt
- * @property {number} timestamp
- */
+export interface BufferedVideoPacket extends BufferedPacket {
+    type: PacketType;
+}
 
-/** @typedef {BufferedPacket & { type: PacketType }} BufferedVideoPacket */
+export interface ReplayerConfig {
+    fps?: number;
+    container?: ContainerName;
+    videoQuality?: number | QualityLevel | Quality;
+    audioQuality?: number | QualityLevel | Quality;
+    audioNode?: AudioNode;
+    targetMB?: number;
+    bitrateMode?: 'constant' | 'variable';
+    bufferSeconds?: number;
+    keyframeInterval?: number;
+    name?: string;
+    onLog?: (message: string) => void;
+    debug?: boolean;
+}
 
-/**
- * @typedef {Object} ReplayerConfig
- * @property {number}   [fps=60]
- * @property {'mp4' | 'mov' | 'webm' | 'mkv'} [container="mp4"]
- * @property {number|QualityLevel|Quality} [videoQuality="high"]
- * @property {number|QualityLevel|Quality} [audioQuality="very-high"]
- * @property {AudioNode} [audioNode]
- * @property {number} [targetMB]
- * @property {'constant' | 'variable'} [bitrateMode="constant"]
- * @property {number} [bufferSeconds=15]
- * @property {number} [keyframeInterval=2]
- * @property {string} [name=""]
- * @property {(message: string) => void} [onLog]
- * @property {boolean} [debug=false]
- */
+/** The subset of {@link ReplayerConfig} that `configure()` accepts. */
+export type ReplayerConfigOverrides = Partial<
+    Pick<
+        ReplayerConfig,
+        | 'fps'
+        | 'container'
+        | 'videoQuality'
+        | 'audioQuality'
+        | 'targetMB'
+        | 'bitrateMode'
+        | 'bufferSeconds'
+        | 'keyframeInterval'
+        | 'audioNode'
+    >
+>;
 
 /**
  * Continuously captures a canvas into a rolling buffer of encoded packets.
@@ -64,8 +80,8 @@ const TARGET_AIM = 0.95;
  * await replayer.saveLastSeconds();
  */
 export class Replayer {
-    /** @returns {boolean} Whether the browser supports the required APIs. */
-    static get isSupported() {
+    /** Whether the browser supports the required APIs. */
+    static get isSupported(): boolean {
         return (
             typeof window !== 'undefined' &&
             'VideoEncoder' in window &&
@@ -73,16 +89,72 @@ export class Replayer {
         );
     }
 
-    /**
-     * @param {HTMLCanvasElement} canvas
-     * @param {ReplayerConfig} [options]
-     */
-    constructor(canvas, options = {}) {
+    canvas: HTMLCanvasElement;
+    fps: number;
+    container: ContainerName;
+    videoQuality: Quality;
+    audioQuality: Quality;
+    audioNode: AudioNode | null;
+    targetMB: number | undefined;
+    bitrateMode: 'constant' | 'variable';
+    bufferSeconds: number;
+    keyframeInterval: number;
+    name: string;
+    onLog: ((message: string) => void) | null;
+    debug: boolean;
+
+    _log: (message: string, level?: 'error') => void;
+
+    // --- Callbacks ---
+    onStart: (() => void) | null = null;
+    onStop: (() => void) | null = null;
+    onPause: (() => void) | null = null;
+    onResume: (() => void) | null = null;
+    onExport: ((result: { duration: number; size: number }) => void) | null = null;
+    onVideoPacket:
+        ((packet: EncodedPacket, meta: EncodedVideoChunkMetadata | undefined) => void) | null =
+        null;
+    onAudioPacket:
+        ((packet: EncodedPacket, meta: EncodedAudioChunkMetadata | undefined) => void) | null =
+        null;
+
+    // --- Recording state ---
+    private _active = false;
+    private _paused = false;
+    private _autoPaused = false;
+    private _lastPruneTime = 0;
+    private _stopVisibilityWatch: (() => void) | null = null;
+
+    private _encodeWidth = 0;
+    private _encodeHeight = 0;
+
+    private _videoCodec: VideoCodec | null = null;
+    private _audioCodec: AudioCodec | null = null;
+
+    videoDecoderConfig: VideoDecoderConfig | null = null;
+    audioDecoderConfig: AudioDecoderConfig | null = null;
+
+    // --- Rolling buffers ---
+    private _videoChunks: BufferedVideoPacket[] = [];
+    private _audioChunks: BufferedPacket[] = [];
+
+    private _resolvedVideoQuality: Quality;
+    private _resolvedAudioQuality: Quality;
+    private _requestedVideoBitrate: number | null = null;
+    private _sizeCorrection = 1;
+
+    // --- Live capture pipeline ---
+    private _holdingOutput: Output | null = null;
+    private _captureStream: MediaStream | null = null;
+    private _videoSource: MediaStreamVideoTrackSource | null = null;
+    private _audioSource: MediaStreamAudioTrackSource | null = null;
+    private _audioTap: AudioTap | null = null;
+
+    constructor(canvas: HTMLCanvasElement, options: ReplayerConfig = {}) {
         this.canvas = canvas;
 
         // --- Config ---
         this.fps = options.fps ?? 60;
-        /** @type {'mp4' | 'mov' | 'webm' | 'mkv'} */
         this.container = options.container ?? 'mp4';
         this.videoQuality = toQuality(options.videoQuality ?? 'high');
         this.audioQuality = toQuality(options.audioQuality ?? 'very-high');
@@ -98,80 +170,20 @@ export class Replayer {
 
         this._log = createLogger(this.onLog, this.debug);
 
-        // --- Callbacks ---
-        /** @type {(() => void) | null} */
-        this.onStart = null;
-        /** @type {(() => void) | null} */
-        this.onStop = null;
-        /** @type {(() => void) | null} */
-        this.onPause = null;
-        /** @type {(() => void) | null} */
-        this.onResume = null;
-        /** @type {((result: { duration: number, size: number }) => void) | null} */
-        this.onExport = null;
-        /** @type {((packet: EncodedPacket, meta: EncodedVideoChunkMetadata | undefined) => void) | null} */
-        this.onVideoPacket = null;
-        /** @type {((packet: EncodedPacket, meta: EncodedAudioChunkMetadata | undefined) => void) | null} */
-        this.onAudioPacket = null;
-
-        // --- Recording state ---
-        this._active = false;
-        this._paused = false;
-        this._autoPaused = false;
-        this._lastPruneTime = 0;
-        this._stopVisibilityWatch = null;
-
-        this._encodeWidth = 0;
-        this._encodeHeight = 0;
-
-        /** @type {import('mediabunny').VideoCodec|null} */
-        this._videoCodec = null;
-        /** @type {import('mediabunny').AudioCodec|null} */
-        this._audioCodec = null;
-
-        /** @type {VideoDecoderConfig|null} */
-        this.videoDecoderConfig = null;
-        /** @type {AudioDecoderConfig|null} */
-        this.audioDecoderConfig = null;
-
-        // --- Rolling buffers ---
-        /** @type {BufferedVideoPacket[]} */
-        this._videoChunks = [];
-        /** @type {BufferedPacket[]} */
-        this._audioChunks = [];
-
-        /** @type {Quality} */
         this._resolvedVideoQuality = this.videoQuality;
-        /** @type {Quality} */
         this._resolvedAudioQuality = this.audioQuality;
-        /** @type {number|null} */
-        this._requestedVideoBitrate = null;
-        this._sizeCorrection = 1;
-
-        // --- Live capture pipeline ---
-        this._holdingOutput = null;
-        /** @type {MediaStream|null} */
-        this._captureStream = null;
-        this._videoSource = null;
-        this._audioSource = null;
-        this._audioTap = null;
     }
 
-    /** @returns {boolean} */
-    get recording() {
+    get recording(): boolean {
         return this._active;
     }
 
-    /** @returns {boolean} */
-    get paused() {
+    get paused(): boolean {
         return this._paused;
     }
 
-    /**
-     * Total byte count of raw encoded packets in the rolling buffer.
-     * @returns {number}
-     */
-    get bufferBytes() {
+    /** Total byte count of raw encoded packets in the rolling buffer. */
+    get bufferBytes(): number {
         let total = 0;
         for (const c of this._videoChunks) total += c.pkt.byteLength;
         for (const c of this._audioChunks) total += c.pkt.byteLength;
@@ -181,10 +193,8 @@ export class Replayer {
     /**
      * Encoded packet byte size an export of `seconds` would produce right now,
      * including the targetMB cap an export would apply.
-     * @param {number} [seconds=this.bufferSeconds]
-     * @returns {number|null}
      */
-    estimateExportBytes(seconds = this.bufferSeconds) {
+    estimateExportBytes(seconds: number = this.bufferSeconds): number | null {
         const clip = this._selectExportWindow(seconds);
         if (!clip) return null;
         const { exportVideo, exportAudio } = clip;
@@ -194,11 +204,11 @@ export class Replayer {
 
         // An export over the budget trims GOP at the front, walk them off the same way
         // so the estimate matches the muxed result instead of the raw window.
-        const lastTs = exportVideo.at(-1).timestamp;
+        const lastTs = exportVideo.at(-1)!.timestamp;
         const span = lastTs - exportVideo[0].timestamp || 1;
         let start = 0;
         let size = videoBytes + audioBytes;
-        while (size > this.targetMB * 1e6) {
+        while (size > this.targetMB! * 1e6) {
             const next = exportVideo.findIndex((c, i) => i > start && c.type === 'key');
             if (next < 0) break;
             for (let i = start; i < next; i++) videoBytes -= exportVideo[i].pkt.byteLength;
@@ -212,32 +222,38 @@ export class Replayer {
      * Update settings, including while recording. Any change that affects the
      * capture rebuilds the pipeline, while buffered footage is only cleared
      * when video encoding semantics have changed.
-     * @typedef {Pick<ReplayerConfig, 'fps' | 'container' | 'videoQuality' | 'audioQuality' | 'targetMB' | 'bitrateMode' | 'bufferSeconds' | 'keyframeInterval' | 'audioNode'>} ReplayerConfigOverrides
-     * @param {ReplayerConfigOverrides} [config]
      */
-    async configure({
-        fps,
-        container,
-        videoQuality,
-        audioQuality,
-        targetMB,
-        bitrateMode,
-        bufferSeconds,
-        keyframeInterval,
-        audioNode
-    } = {}) {
+    async configure(overrides: ReplayerConfigOverrides = {}): Promise<void> {
+        const {
+            fps,
+            container,
+            videoQuality,
+            audioQuality,
+            targetMB,
+            bitrateMode,
+            bufferSeconds,
+            keyframeInterval,
+            audioNode
+        } = overrides;
+
+        if (container !== undefined && !CONTAINERS[container])
+            throw new Error(`Unsupported container "${container}".`);
+
+        const prevBitrateMode = this.bitrateMode;
         if (fps !== undefined) this.fps = fps;
         if (bufferSeconds !== undefined) this.bufferSeconds = bufferSeconds;
         if (keyframeInterval !== undefined) this.keyframeInterval = keyframeInterval;
-        if (container !== undefined && !CONTAINERS[container]) {
-            throw new Error(`Unsupported container "${container}".`);
-        }
+        if (container !== undefined) this.container = container;
         if (targetMB !== undefined) this.targetMB = targetMB;
-        const prevBitrateMode = this.bitrateMode;
         if (bitrateMode !== undefined) this.bitrateMode = bitrateMode;
+        if (videoQuality !== undefined) this.videoQuality = toQuality(videoQuality);
+        if (audioQuality !== undefined) this.audioQuality = toQuality(audioQuality);
+        if (audioNode !== undefined) this.audioNode = audioNode;
 
         const targetMBActive = this._targetMBActive();
         const qualityChange = videoQuality !== undefined || audioQuality !== undefined;
+        // Changes that invalidate buffered packets demand a reset; everything
+        // else rebuilds capture while keeping the footage.
         const encoderChanged =
             (qualityChange && !targetMBActive) ||
             container !== undefined ||
@@ -249,15 +265,10 @@ export class Replayer {
             (bitrateMode !== undefined && bitrateMode !== prevBitrateMode && targetMBActive) ||
             (audioNode !== undefined && audioNode !== this.audioNode);
 
-        if (container !== undefined) this.container = container;
-        if (videoQuality !== undefined) this.videoQuality = toQuality(videoQuality);
-        if (audioQuality !== undefined) this.audioQuality = toQuality(audioQuality);
-        if (audioNode !== undefined) this.audioNode = audioNode;
-
         if (rebuild && this._active) await this._reinitSources(encoderChanged);
     }
 
-    pause() {
+    pause(): void {
         if (!this._active) throw new Error('Not recording.');
         if (this._paused) return;
         this._paused = true;
@@ -266,7 +277,7 @@ export class Replayer {
         this.onPause?.();
     }
 
-    resume() {
+    resume(): void {
         if (!this._active) throw new Error('Not recording.');
         if (!this._paused) return;
         this._videoSource?.resume();
@@ -276,7 +287,7 @@ export class Replayer {
     }
 
     /** Start filling the rolling buffer. */
-    async start() {
+    async start(): Promise<void> {
         if (this._active) throw new Error('Already recording.');
 
         this._encodeWidth = this.canvas.width & ~1;
@@ -329,7 +340,7 @@ export class Replayer {
      * Stop buffering and clear the buffer. Call `saveLastSeconds()` beforehand
      * if you want to keep the current footage.
      */
-    async stop() {
+    async stop(): Promise<void> {
         if (!this._active) throw new Error('Not recording.');
         this._active = false;
         this._paused = false;
@@ -352,12 +363,13 @@ export class Replayer {
 
     /**
      * Mux the last `seconds` of buffered footage into a file and optionally download it.
-     * @param {number} [seconds=this.bufferSeconds]
-     * @param {{ download?: boolean }} [options] - Set `download: false` to get the
-     *   blob without triggering a download.
-     * @returns {Promise<Blob|null>}
+     * @param options Set `download: false` to get the blob without triggering a download.
+     * @returns The muxed clip, or `null` when nothing is exportable yet.
      */
-    async saveLastSeconds(seconds = this.bufferSeconds, { download = true } = {}) {
+    async saveLastSeconds(
+        seconds: number = this.bufferSeconds,
+        { download = true }: { download?: boolean } = {}
+    ): Promise<Blob | null> {
         if (!this.videoDecoderConfig || !this._videoChunks.length) {
             this._log('saveLastSeconds: insufficient data to export');
             return null;
@@ -378,16 +390,16 @@ export class Replayer {
             return this._mux(exportVideo, exportAudio, firstTs);
         };
         const clipLen = () =>
-            exportVideo.at(-1).timestamp - exportVideo[0].timestamp + 1 / this.fps;
+            exportVideo.at(-1)!.timestamp - exportVideo[0].timestamp + 1 / this.fps;
         const fullSeconds = clipLen();
 
         const targeting = this._targetMBActive();
-        const targetBytes = targeting ? this.targetMB * 1e6 : 0;
+        const targetBytes = targeting ? this.targetMB! * 1e6 : 0;
 
         let blob = await muxWindow();
         const fullBlobSize = blob.size;
 
-        // When over budet: drop the oldest key frame groups and remux until it fits
+        // When over budget: drop the oldest key frame groups and remux until it fits
         let droppedGOPs = 0;
         if (targeting) {
             let guard = 0;
@@ -432,21 +444,20 @@ export class Replayer {
         return blob;
     }
 
-    /** @private */
-    _targetMBActive() {
+    private _targetMBActive(): boolean {
         return typeof this.targetMB === 'number' && this.targetMB > 0;
     }
 
     /**
      * The last `seconds` of the footage, starting on the keyframe at or before the window start.
-     * @private
-     * @param {number} seconds
-     * @returns {{ exportVideo: BufferedVideoPacket[], exportAudio: BufferedPacket[] } | null}
      */
-    _selectExportWindow(seconds) {
+    private _selectExportWindow(seconds: number): {
+        exportVideo: BufferedVideoPacket[];
+        exportAudio: BufferedPacket[];
+    } | null {
         const video = this._videoChunks;
         if (!video.length) return null;
-        const lastTs = video.at(-1).timestamp;
+        const lastTs = video.at(-1)!.timestamp;
         const windowStart = lastTs - Math.min(seconds, lastTs - video[0].timestamp);
         // Keyframe at or just before the window, forward fallback for the first GOP
         let start = -1;
@@ -465,45 +476,31 @@ export class Replayer {
         const exportAudio = this._audioChunks.filter(
             (c) =>
                 c.timestamp >= exportVideo[0].timestamp &&
-                c.timestamp <= exportVideo.at(-1).timestamp
+                c.timestamp <= exportVideo.at(-1)!.timestamp
         );
         return { exportVideo, exportAudio };
     }
 
-    /**
-     * Smooth a measured ratio into `current` (EMA, alpha 0.3), clamped to `[min, max]`.
-     * @private
-     * @param {number} current
-     * @param {number} measured
-     * @param {number} min
-     * @param {number} max
-     * @returns {number}
-     */
-    _smoothRatio(current, measured, min, max) {
+    /** Smooth a measured ratio into `current` (EMA, alpha 0.3), clamped to `[min, max]`. */
+    private _smoothRatio(current: number, measured: number, min: number, max: number): number {
         if (!Number.isFinite(measured) || measured <= 0) return current;
         return Math.min(max, Math.max(min, current + 0.3 * (measured - current)));
     }
 
-    /**
-     * Observed audio bitrate in the buffer, `null` with too little data.
-     * @private
-     */
-    _measuredAudioBitrate() {
+    /** Observed audio bitrate in the buffer, `null` with too little data. */
+    private _measuredAudioBitrate(): number | null {
         const chunks = this._audioChunks;
         if (chunks.length < 2) return null;
-        const span = chunks.at(-1).timestamp - chunks[0].timestamp;
+        const span = chunks.at(-1)!.timestamp - chunks[0].timestamp;
         if (span <= 0) return null;
         return (this._sumBytes(chunks) * 8) / span;
     }
 
     /**
      * Video Quality sized so a full export window lands at `TARGET_AIM` of `targetMB`.
-     * @private
-     * @param {number} audioBitrate
-     * @returns {Quality}
      */
-    _targetVideoQuality(audioBitrate) {
-        const targetBits = this.targetMB * 1e6 * 8;
+    private _targetVideoQuality(audioBitrate: number): Quality {
+        const targetBits = this.targetMB! * 1e6 * 8;
         const perSecondBits = targetBits / Math.max(1 / this.fps, this.bufferSeconds);
         const available = (perSecondBits - audioBitrate) * this._sizeCorrection;
         if (available < 1000) {
@@ -514,20 +511,19 @@ export class Replayer {
                     `export will exceed the target.`
             );
         }
-        this._requestedVideoBitrate = Math.round(Math.max(1000, available));
-        return new Quality({ bitrate: this._requestedVideoBitrate, bitrateMode: this.bitrateMode });
+        const bitrate = Math.round(Math.max(1000, available));
+        this._requestedVideoBitrate = bitrate;
+        return new Quality({ bitrate, bitrateMode: this.bitrateMode });
     }
 
-    /**
-     * @param {BufferedPacket[]} chunks
-     * @private
-     */
-    _sumBytes(chunks) {
+    private _sumBytes(chunks: BufferedPacket[]): number {
         return chunks.reduce((sum, c) => sum + c.pkt.byteLength, 0);
     }
 
-    /** @private */
-    async _selectCodecs() {
+    private async _selectCodecs(): Promise<{
+        videoCodec: VideoCodec;
+        audioCodec: AudioCodec | null;
+    }> {
         const containerDef = CONTAINERS[this.container];
         if (!containerDef) throw new Error(`Unsupported container "${this.container}".`);
         const format = new containerDef.Format();
@@ -559,13 +555,16 @@ export class Replayer {
         return { videoCodec, audioCodec };
     }
 
-    /** @private */
-    async _initSources(videoTail = null, audioTail = null) {
+    private async _initSources(
+        videoTail: number | null = null,
+        audioTail: number | null = null
+    ): Promise<void> {
         const containerDef = CONTAINERS[this.container];
-        this._holdingOutput = new Output({
+        const output = new Output({
             format: new containerDef.Format(containerDef.streaming),
             target: new NullTarget()
         });
+        this._holdingOutput = output;
 
         this._captureStream = this.canvas.captureStream(this.fps);
         const [videoTrack] = this._captureStream.getVideoTracks();
@@ -574,8 +573,8 @@ export class Replayer {
         const videoOffset = videoTail ?? 0;
         const audioOffset = audioTail ?? 0;
 
-        this._videoSource = new MediaStreamVideoTrackSource(videoTrack, {
-            codec: this._videoCodec,
+        this._videoSource = new MediaStreamVideoTrackSource(videoTrack as MediaStreamVideoTrack, {
+            codec: this._videoCodec!,
             quality: this._resolvedVideoQuality,
             contentHint: 'motion',
             sizeChangeBehavior: 'contain',
@@ -595,9 +594,9 @@ export class Replayer {
             }
         });
         this._videoSource.errorPromise.catch((err) => {
-            this._log(`Video source error: ${err?.message ?? err}, 'error'`);
+            this._log(`Video source error: ${err?.message ?? err}`, 'error');
         });
-        this._holdingOutput.addVideoTrack(this._videoSource, { frameRate: this.fps });
+        output.addVideoTrack(this._videoSource, { frameRate: this.fps });
 
         if (this.audioNode && this._audioCodec) {
             this._audioTap = tapAudioNode(this.audioNode);
@@ -615,17 +614,16 @@ export class Replayer {
                     }
                 });
                 this._audioSource.errorPromise.catch((err) => {
-                    this._log(`Audio source error: ${err?.message ?? err}, 'error'`);
+                    this._log(`Audio source error: ${err?.message ?? err}`, 'error');
                 });
-                this._holdingOutput.addAudioTrack(this._audioSource);
+                output.addAudioTrack(this._audioSource);
             }
         }
 
-        await this._holdingOutput.start();
+        await output.start();
     }
 
-    /** @private */
-    async _teardownSources() {
+    private async _teardownSources(): Promise<void> {
         const { _videoSource, _audioSource, _audioTap } = this;
         this._videoSource = null;
         this._audioSource = null;
@@ -641,10 +639,8 @@ export class Replayer {
 
     /**
      * Rebuild the capture pipeline, keeping buffered packets unless `resetBuffer`.
-     * @private
-     * @param {boolean} resetBuffer
      */
-    async _reinitSources(resetBuffer) {
+    private async _reinitSources(resetBuffer: boolean): Promise<void> {
         const { videoCodec, audioCodec } = await this._selectCodecs();
         this._videoCodec = videoCodec;
         this._audioCodec = audioCodec;
@@ -667,11 +663,8 @@ export class Replayer {
         );
     }
 
-    /**
-     * Trim the rolling buffer which is throttled to 1/s
-     * @private
-     */
-    _pruneIfDue() {
+    /** Trim the rolling buffer which is throttled to 1/s */
+    private _pruneIfDue(): void {
         const now = performance.now();
         if (now - this._lastPruneTime < 1000) return;
         this._lastPruneTime = now;
@@ -684,32 +677,27 @@ export class Replayer {
         this._audioChunks = this._audioChunks.filter((c) => c.timestamp >= cutoff);
     }
 
-    /**
-     * @param {{ add(packet: EncodedPacket, meta?: object): Promise<void> }} source
-     * @param {BufferedPacket} chunk
-     * @param {number} firstTs
-     * @param {VideoDecoderConfig | AudioDecoderConfig | null} decoderConfig
-     * @param {boolean} isFirst
-     * @private
-     */
-    async _addPacket(source, chunk, firstTs, decoderConfig, isFirst) {
+    private async _addPacket(
+        source: { add(packet: EncodedPacket, meta?: object): Promise<void> },
+        chunk: BufferedPacket,
+        firstTs: number,
+        decoderConfig: VideoDecoderConfig | AudioDecoderConfig | null,
+        isFirst: boolean
+    ): Promise<void> {
         const normalized = chunk.pkt.clone({ timestamp: chunk.timestamp - firstTs });
         await source.add(normalized, isFirst ? { decoderConfig } : {});
     }
 
-    /**
-     * @param {BufferedVideoPacket[]} videoChunks
-     * @param {BufferedPacket[]} audioChunks
-     * @param {number} firstTs
-     * @returns {Promise<Blob>}
-     * @private
-     */
-    async _mux(videoChunks, audioChunks, firstTs) {
+    private async _mux(
+        videoChunks: BufferedVideoPacket[],
+        audioChunks: BufferedPacket[],
+        firstTs: number
+    ): Promise<Blob> {
         const containerDef = CONTAINERS[this.container];
         const outputFormat = new containerDef.Format(containerDef.export);
         const output = new Output({ format: outputFormat, target: new BufferTarget() });
 
-        const videoSource = new EncodedVideoPacketSource(this._videoCodec);
+        const videoSource = new EncodedVideoPacketSource(this._videoCodec!);
         const audioSource =
             this._audioCodec && audioChunks.length
                 ? new EncodedAudioPacketSource(this._audioCodec)
@@ -742,7 +730,7 @@ export class Replayer {
                 vi++;
             } else {
                 await this._addPacket(
-                    audioSource,
+                    audioSource!,
                     audioChunks[ai],
                     firstTs,
                     this.audioDecoderConfig,
@@ -757,6 +745,8 @@ export class Replayer {
         if (audioSource) audioSource.close();
         await output.finalize();
 
-        return new Blob([output.target.buffer], { type: outputFormat.mimeType });
+        return new Blob([(output.target as BufferTarget).buffer!], {
+            type: outputFormat.mimeType
+        });
     }
 }
