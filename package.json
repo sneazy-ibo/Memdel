@@ -4,7 +4,6 @@
     "description": "Record and clip HTML canvas + Web Audio output to MP4",
     "license": "GPL-3.0-or-later",
     "author": "sneazy-ibo",
-    "homepage": "https://github.com/sneazy-ibo/Memdel#readme",
     "repository": {
         "type": "git",
         "url": "https://github.com/sneazy-ibo/Memdel"
@@ -51,7 +50,7 @@
         "@types/dom-webcodecs": "^0.1.19",
         "@types/wicg-file-system-access": "^2023.10.7",
         "esbuild": "^0.28.2",
-        "mediabunny": "^1.56.0",
+        "mediabunny": "^1.60.0",
         "prettier": "3.9.6",
         "typescript": "^5.9.3"
     },

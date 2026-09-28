@@ -21,29 +21,25 @@ export interface ContainerDef {
     export: IsobmffOutputFormatOptions | MkvOutputFormatOptions;
 }
 
-export const CONTAINERS: Record<ContainerName, ContainerDef> = {
-    mp4: {
-        Format: Mp4OutputFormat,
-        streaming: { fastStart: 'fragmented' },
-        buffer: { fastStart: false },
-        export: { fastStart: 'in-memory' }
-    },
-    mov: {
-        Format: MovOutputFormat,
-        streaming: { fastStart: 'fragmented' },
-        buffer: { fastStart: false },
-        export: { fastStart: 'in-memory' }
-    },
-    webm: {
-        Format: WebMOutputFormat,
-        streaming: { appendOnly: true },
-        buffer: {},
-        export: {}
-    },
-    mkv: {
-        Format: MkvOutputFormat,
-        streaming: { appendOnly: true },
-        buffer: {},
-        export: {}
-    }
+// mp4/mov and webm/mkv share their options
+const ISOBMFF: Pick<ContainerDef, 'streaming' | 'buffer' | 'export'> = {
+    streaming: { fastStart: 'fragmented' },
+    buffer: { fastStart: false },
+    export: { fastStart: 'in-memory' }
 };
+
+const MATROSKA: Pick<ContainerDef, 'streaming' | 'buffer' | 'export'> = {
+    streaming: { appendOnly: true },
+    buffer: {},
+    export: {}
+};
+
+export const CONTAINERS: Record<ContainerName, ContainerDef> = {
+    mp4: { Format: Mp4OutputFormat, ...ISOBMFF },
+    mov: { Format: MovOutputFormat, ...ISOBMFF },
+    webm: { Format: WebMOutputFormat, ...MATROSKA },
+    mkv: { Format: MkvOutputFormat, ...MATROSKA }
+};
+
+/** Every supported container, in display order. */
+export const CONTAINER_NAMES = Object.keys(CONTAINERS) as ContainerName[];

@@ -36,6 +36,7 @@ await Promise.all([
         format: 'iife',
         globalName: 'Memdel',
         outfile: 'dist/index.iife.min.js',
-        minify: true
+        minify: true,
+        sourcemap: false
     })
 ]);
