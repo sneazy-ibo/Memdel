@@ -205,6 +205,19 @@ export class Recorder {
         return this._directoryHandle;
     }
 
+    /**
+     * Adopts a directory handle the app already has access to, e.g. one restored
+     * from IndexedDB, skipping the picker. Returns false when access is no longer
+     * granted, call `handle.requestPermission()` from a user gesture and retry.
+     */
+    async useRecordingDirectory(handle: FileSystemDirectoryHandle): Promise<boolean> {
+        if (!Recorder.filesystemSupported || typeof handle.queryPermission !== 'function')
+            return false;
+        if ((await handle.queryPermission({ mode: 'readwrite' })) !== 'granted') return false;
+        this._directoryHandle = handle;
+        return true;
+    }
+
     clearRecordingDirectory(): void {
         this._directoryHandle = null;
     }

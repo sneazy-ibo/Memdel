@@ -127,11 +127,23 @@ const replayer = new Replayer(canvas, { audioNode: masterGain, targetMB: 16 });
 On browsers that support the File System Access API, you can record straight to a folder instead of recording in memory and triggering a browser download each time:
 
 ```js
+const recorder = new Recorder(canvas, { saveMode: 'auto' }); // uses the directory if set, else falls back to download
+
 if (Recorder.filesystemSupported) {
     await recorder.setRecordingDirectory(); // prompts the user once
 }
+```
 
-const recorder = new Recorder(canvas, { saveMode: 'auto' }); // uses the directory if set, else falls back to download
+The handle can be saved with structured cloning, so store it in IndexedDB to skip the picker on later visits. The permission is not saved with the handle, so request it again from a user gesture:
+
+```js
+await saveHandleToIndexedDb(await recorder.setRecordingDirectory());
+
+// next visit
+const saved = await loadHandleFromIndexedDb();
+if (saved && !(await recorder.useRecordingDirectory(saved))) {
+    // not granted yet: call saved.requestPermission({ mode: 'readwrite' }) from a click
+}
 ```
 
 ## API
@@ -165,6 +177,7 @@ const recorder = new Recorder(canvas, { saveMode: 'auto' }); // uses the directo
 - `recorder.directoryName`: name of the selected recording directory, or `null`.
 - `recorder.configure(options)`: update config between recordings (throws if called while recording). Accepts any of `fps`, `container`, `videoQuality`, `audioQuality`, `bitrateMode`, `saveMode`, `audioNode`.
 - `await recorder.setRecordingDirectory()`: prompts the user to pick a folder, resolves to the directory handle.
+- `await recorder.useRecordingDirectory(handle)`: adopts a stored handle without prompting; resolves to `true` when access is still granted, `false` when a `requestPermission()` call from a user gesture is needed.
 - `recorder.pause()` / `recorder.resume()`
 - `await recorder.start()`
 - `await recorder.stop()`: resolves to `{ duration, size }`.
